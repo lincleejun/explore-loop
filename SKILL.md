@@ -8,7 +8,7 @@ description: Verify improvement ideas on any project by measurement (speed, accu
 **想法、理由、证据是你的事；验证是工具的事。**
 怎么找瓶颈、提什么方案、派不派子代理、记录写多长，这里都不规定。这里只保证一件事：一个改动说自己有用，得量出来才算数。
 
-工具是本目录的 `./explore`（Python 3.11+，只用标准库；源在 `outman.me` 仓库的 `skills/explore-loop/`，不改安装的副本）。
+工具是本目录的 `./explore`（Python 3.11+，只用标准库）。
 
 ```sh
 explore init ~/wt/<名称> --repo <仓库> --measure '<打印指标行的命令>' --test '<测试命令>' [--build '<构建命令>']
