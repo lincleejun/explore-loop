@@ -1,41 +1,41 @@
 #!/usr/bin/env python3
-"""explore：探索循环里由工具强制的那一部分。其余靠 workflow.md 和 roles.md。
+"""explore：可测量改进实验的工具。它管三件事：量得对不对、能不能落地、记没记账。
 
-  explore init DIR                      新建战役目录（explore.toml、档案、账本、模板）
-  explore doctor [--snapshot]           查配置；--snapshot 重新记下 locked 路径的指纹
-  explore aa                            基线对基线量一次：必须全部"噪声内"，否则后面的数字都不可信
-  explore ab BASE_WT CAND_WT --out DIR  先构建，再交替测量（基-候、候-基…），给出判定
-  explore pool BASE_DIR.. -- CAND_DIR.. 把已有的几组测量合起来判定（环境指纹不同就拒绝）
-  explore check FILE..                  核对调查员 / 评审 / 合同结尾的 json 块
-  explore scope E### WT                 候选改动的文件是否都在合同的 allowed 里（对分支点的三点 diff）
-  explore land E### WT [--dry-run] [--owner-ok 理由]
-                                        落地闸门：范围、locked、测试、不变量、评审结论、重新测量，全过才快进合并
+日常（quick，默认）：
+  explore init DIR --repo REPO --measure CMD --test CMD [--build CMD]   建战役目录和基线 worktree
+  explore aa                        校准：同一份代码量两边，得到每个指标的噪声。换机器、换测量命令后重做
+  explore new "标题" --target 指标 --allow 'src/x/*' [--predict 数]      建实验：编号、worktree、合同
+  explore land E### [--dry-run]     闸门：范围 → 测试 → 不变量 →（strict：评审）→ 测量 → 判定 → 快进合并 → 记账
   explore close E### --as 放弃|拒绝|改向 --why 理由
-  explore holdout NAME --why 理由 -- CMD 用一次留出集并记账
-  explore status                        账本、当前基线、留出集用了几次
+  explore next                      现在卡在哪，下一条命令是什么
+  explore status                    账本（每个实验的预测对实测）
+
+其余：
+  explore power [--noise 3] [--metrics 15] [--pairs 10]   这套判定在你的噪声下会误拦多少、能看出多大的变化
+  explore ab BASE_WT CAND_WT        只比较两个 worktree，不落地
+  explore doctor [--snapshot]       查配置；--snapshot 重记 locked 路径的指纹
+  explore check FILE..              核对合同 / 提案 / 评审结尾的 json 块
+  explore holdout NAME --why 理由 -- CMD   用一次留出集并记账
   explore selftest
 
-战役目录：--run DIR，或环境变量 EXPLORE_RUN，或当前目录（要有 explore.toml）。
-指标行（项目的测量命令打印，行尾对齐）：
-  PERF <名称> <数字> <s|ms>                      耗时，越小越好
-  METRIC <lower|higher|exact> <名称> <数字> <单位>  exact = 必须一模一样（任何差别都算回归）
-判定：两边全部单次结果两两比较，候选更好的占比 ≥ win% 变好，≤ 100-win% 变差；变差且中位数差超过 guard% = 回归；
-中位数之差小于 floor（指标自己的单位）一律噪声内。
+战役目录：--run DIR，或环境变量 EXPLORE_RUN，或当前目录。
+指标行（测量命令打印）：  PERF <名称> <数字> <s|ms>            耗时，越小越好
+                          METRIC <lower|higher|exact> <名称> <值> <单位>   exact = 必须一模一样
+判定：基线和候选成对测量 n 对，每个指标要同时满足两条才算变了（criterion.rs、asv 的做法）：
+  方向显著：候选更好（或更差）的对数的精确二项尾概率 ≤ alpha / 指标数；幅度够大：成对差的中位数超过门槛。
+  目标的门槛是合同的 min_gain（默认 0）→ 变好。其余指标的门槛是容忍度 max(guard% × 基线中位, floor, 校准量到的噪声) → 回归。
+  判不出 = 证据不足，不是"没有回归"。
 """
-import argparse, datetime, fcntl, fnmatch, hashlib, json, os, pathlib, platform, re, shutil, statistics, subprocess, sys, tomllib
+import argparse, contextlib, datetime, fcntl, fnmatch, hashlib, json, math, os, pathlib, platform, random, re, shutil, statistics, subprocess, sys, tomllib
 
 P = pathlib.Path
 HERE = P(__file__).resolve().parent
-NUM = r"(-?\d+(?:\.\d+)?(?:[eE]-?\d+)?)"
-LINE = re.compile(rf"(?:PERF|BENCH) (.+?) {NUM} (s|ms)\s*$|METRIC (lower|higher|exact) (.+?) {NUM} (\S+)\s*$")
+LINE = re.compile(r"(?:PERF|BENCH) (.+?) (-?\d+(?:\.\d+)?(?:[eE]-?\d+)?) (s|ms)\s*$|METRIC (lower|higher|exact) (.+?) (\S+) (\S+)\s*$")
 LABELS = ("【读到】", "【查到】", "【推导】", "【预测】", "【未验证】")
-NEED = {  # 结尾 json 块的必填键
-    "contract": ["id", "title", "targets", "predict", "allowed"],
-    "proposals": ["items"],
-    "review": ["target", "sha", "findings", "checked"],
-}
+NEED = {"contract": ["id", "title", "targets", "allowed"], "proposals": ["items"], "review": ["target", "sha", "findings", "checked"]}
 ITEM = {"proposals": ["metric", "baseline", "predicted", "where", "evidence", "falsify", "kill_line", "risks"],
         "review": ["where", "before", "after", "input", "blocking"]}
+DONE = ("接受", "放弃", "拒绝", "改向")
 
 
 def die(msg, code=1):
@@ -43,16 +43,15 @@ def die(msg, code=1):
 
 
 def sh(cmd, cwd, log=None, env=None):
-    p = subprocess.run(cmd, shell=True, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                       env={**os.environ, **(env or {})})
+    p = subprocess.run(cmd, shell=True, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env={**os.environ, **(env or {})})
     if log:
         log.parent.mkdir(parents=True, exist_ok=True); log.write_text(p.stdout)
     return p.returncode, p.stdout
 
 
-def git(wt, *a):
+def git(wt, *a, ok=False):
     p = subprocess.run(["git", "-C", str(wt), *a], capture_output=True, text=True)
-    if p.returncode: die(f"git {' '.join(a)}（{wt}）：{p.stderr.strip()}")
+    if p.returncode and not ok: die(f"git {' '.join(a)}（{wt}）：{p.stderr.strip()}")
     return p.stdout.strip()
 
 
@@ -61,84 +60,102 @@ def now(): return datetime.datetime.now().isoformat(timespec="seconds")
 
 # ---------- 指标与判定 ----------
 
-def parse(text):
-    """一遍输出 -> {名称: (值, 单位, 方向)}。同名取最后一次；ms 换成 s。"""
+def parse(text, where=""):
+    """一遍输出 -> {名称: {v, raw, unit, way}}。同名出现两次 = 测量命令有问题，不猜。"""
     out = {}
     for m in map(LINE.search, text.splitlines()):
         if not m: continue
-        if m[1]: out[m[1]] = (float(m[2]) / (1000 if m[3] == "ms" else 1), "s", "lower")
-        else: out[m[5]] = (float(m[6]), m[7], m[4])
+        name = m[1] or m[5]
+        if name in out: die(f"{where}：指标 {name} 在一遍里出现了两次")
+        if m[1]: out[name] = {"v": float(m[2]) / (1000 if m[3] == "ms" else 1), "raw": m[2] + m[3], "unit": "s", "way": "lower"}
+        else:
+            try: v = float(m[6])
+            except ValueError: v = None
+            if m[4] != "exact" and (v is None or not math.isfinite(v)): die(f"{where}：指标 {name} 的值 {m[6]} 不是有限的数字")
+            out[name] = {"v": v, "raw": m[6], "unit": m[7], "way": m[4]}
     return out
 
 
-def pooled(b, c, way="lower", win=85, guard=5, floor=0):
-    """b、c：两边全部单次结果。返回 (判定, 中位变化%, 候选更好的两两比较占比%)。并列各算半个。"""
-    mb, mc = statistics.median(b), statistics.median(c)
-    change = (mc - mb) / abs(mb) * 100 if mb else 0.0
-    if way == "exact":
-        return ("相同" if set(b) == set(c) and len(set(b)) == 1 else "不同"), change, 50.0
-    s = -1 if way == "higher" else 1
-    better = sum((s * x < s * y) + 0.5 * (x == y) for x in c for y in b) / (len(b) * len(c)) * 100
-    if abs(mc - mb) < floor: return "噪声内", change, better
-    if better >= win: return "变好", change, better
-    if better <= 100 - win: return ("回归" if s * change > guard else "变差"), change, better
-    return "噪声内", change, better
+def tail(k, n):
+    """n 对里至少 k 对的精确概率（每对各半）。"""
+    return sum(math.comb(n, j) for j in range(k, n + 1)) / 2 ** n
 
 
-def load(dirs):
-    out = {}
-    for d in dirs:
-        logs = sorted(P(d).glob("run-*.log"))
-        if not logs: die(f"{d} 里没有 run-*.log")
-        for f in logs:
-            for k, (v, unit, way) in parse(f.read_text()).items():
-                out.setdefault(k, {"unit": unit, "way": way, "v": []})["v"].append(v)
-    return out
+def decide(b, c, way, gain, loss, cut):
+    """b[i]、c[i] 是同一对里的基线和候选。两个条件都满足才算数：方向显著（符号检验），而且中位差超过门槛。
+    返回 (判定, 候选更好的对数, 候选更差的对数)。"""
+    s = 1 if way == "higher" else -1
+    d = [s * (y - x) for x, y in zip(b, c)]; n = len(d); med = statistics.median(d)
+    up, down = sum(x > 0 for x in d), sum(x < 0 for x in d)
+    if tail(up, n) <= cut: return ("变好" if med > gain else "证据不足"), up, down
+    if tail(down, n) <= cut: return ("回归" if med < -loss else "变差"), up, down     # 变差 = 确实差了，但在容忍度内
+    return ("可疑" if med < -loss else "证据不足"), up, down                          # 可疑 = 中位差越线，但方向不显著
 
 
-def judge(base_dirs, cand_dirs, rule, out=None):
-    b, c = load(base_dirs), load(cand_dirs)
-    rows = []
-    for k in sorted(set(b) | set(c)):
-        if k not in b or k not in c:  # 少了指标 = 有东西被静默跳过，不是"没变化"
-            rows.append({"metric": k, "verdict": "缺", "side": "基线" if k in b else "候选"}); continue
-        v, change, better = pooled(b[k]["v"], c[k]["v"], b[k]["way"], rule["win"], rule["guard"], rule["floor"])
-        rows.append({"metric": k, "unit": b[k]["unit"], "way": b[k]["way"], "verdict": v, "change": round(change, 2),
-                     "better": round(better), "base": statistics.median(b[k]["v"]), "cand": statistics.median(c[k]["v"]),
-                     "n": [len(b[k]["v"]), len(c[k]["v"])]})
-    lines = ["| 指标 | 基线 中位（n） | 候选 中位（n） | 变化 | 候选更好占比 | 判定 |", "|---|---|---|---|---|---|"]
-    for r in rows:
-        lines.append(f"| {r['metric']} | 只在{r['side']}出现 | | | | 缺 |" if r["verdict"] == "缺" else
-                     f"| {r['metric']} | {r['base']:.4g} {r['unit']}（{r['n'][0]}） | {r['cand']:.4g} {r['unit']}（{r['n'][1]}） | {r['change']:+.1f}% | {r['better']}% | {r['verdict']} |")
-    print("\n".join(lines))
+def need_pairs(m, alpha): return math.ceil(math.log2(m / alpha))   # 少于这个数，全部同向也到不了显著
+
+
+def load(out):
+    """测量目录 -> {名称: {unit, way, b: [..], c: [..], raw: set}}。每一遍的指标集合、单位、方向必须一致。"""
+    out = P(out); data = {}; n = len(list((out / "base").glob("run-*.log")))
+    if not n or n != len(list((out / "cand").glob("run-*.log"))): die(f"{out}：两边的遍数不一样或为零")
+    for i in range(1, n + 1):
+        for side in ("base", "cand"):
+            f = out / side / f"run-{i}.log"; got = parse(f.read_text(), str(f))
+            if i == 1 and side == "base": data = {k: {"unit": v["unit"], "way": v["way"], "b": [], "c": [], "raw": set()} for k, v in got.items()}
+            if {k: (v["unit"], v["way"]) for k, v in got.items()} != {k: (v["unit"], v["way"]) for k, v in data.items()}:
+                die(f"{f}：指标的集合、单位或方向和第一遍不一样（少了指标 = 有东西被静默跳过）：{sorted(set(got) ^ set(data)) or '单位 / 方向变了'}")
+            for k, v in got.items(): data[k]["b" if side == "base" else "c"].append(v["v"]); data[k]["raw"].add(v["raw"])
+    if not data: die(f"{out}：没有任何指标行")
+    return data
+
+
+def judge(data, rule, targets=(), gains=None, noise=None, out=None):
+    m = len(data); n = len(next(iter(data.values()))["b"]); cut = rule["alpha"] / m; rows = []
+    if n < need_pairs(m, rule["alpha"]): die(f"{m} 个指标、alpha {rule['alpha']} 至少要 {need_pairs(m, rule['alpha'])} 对才可能判出变化，现在只有 {n} 对")
+    for k, x in sorted(data.items()):
+        if x["way"] == "exact":
+            rows.append({"metric": k, "verdict": "相同" if len(x["raw"]) == 1 else "不同", "values": sorted(x["raw"])[:4]}); continue
+        mb, mc = statistics.median(x["b"]), statistics.median(x["c"])
+        loss = max(rule["guard"] / 100 * abs(mb), rule["floor"], (noise or {}).get(k, 0))
+        v, up, down = decide(x["b"], x["c"], x["way"], (gains or {}).get(k, 0) if k in targets else 0, loss, cut)
+        rows.append({"metric": k, "unit": x["unit"], "verdict": v, "base": mb, "cand": mc, "change": round((mc - mb) / abs(mb) * 100, 2) if mb else None,
+                     "up": up, "down": down, "n": n, "loss": loss, "target": k in targets})
+    def line(r):
+        if "base" not in r: return f"| {r['metric']} | {' / '.join(r['values'])} | | | | {r['verdict']} |"
+        ch = f"{r['change']:+.1f}%" if r["change"] is not None else "—"
+        return f"| {'**' + r['metric'] + '**' if r['target'] else r['metric']} | {r['base']:.4g} {r['unit']} | {r['cand']:.4g} {r['unit']} | {ch} | 好 {r['up']} / 差 {r['down']} / 共 {r['n']} | {r['verdict']} |"
+    head = ["| 指标（**目标**） | 基线中位 | 候选中位 | 变化 | 成对比较 | 判定 |", "|---|---|---|---|---|---|"]
+    show = [r for r in rows if r.get("target") or r["verdict"] not in ("证据不足", "相同")]   # 只显示目标和动了的
+    print("\n".join(head + [line(r) for r in show])); print(f"其余 {len(rows) - len(show)} 个指标没有可判定的变化（显著线：单侧 p ≤ {cut:.4f}）")
     if out:
         (P(out) / "verdict.json").write_text(json.dumps(rows, ensure_ascii=False, indent=1))
-        (P(out) / "verdict.md").write_text("\n".join(lines) + "\n")
+        (P(out) / "verdict.md").write_text("\n".join(head + [line(r) for r in rows]) + "\n")
     return rows
 
 
-def bad(rows): return [r["metric"] for r in rows if r["verdict"] in ("回归", "不同", "缺")]
+def blockers(rows, targets):
+    by = {r["metric"]: r for r in rows}
+    return [f"目标 {t}：{by.get(t, {}).get('verdict', '没量到')}" for t in targets if by.get(t, {}).get("verdict") != "变好"] + \
+           [f"{r['metric']}：{r['verdict']}" for r in rows if r["verdict"] in ("回归", "不同") and not r.get("target")]
 
 
 # ---------- 战役目录 ----------
 
 class Run:
     def __init__(self, d):
-        self.dir = P(d).resolve()
-        f = self.dir / "explore.toml"
+        self.dir = P(d).resolve(); f = self.dir / "explore.toml"
         if not f.exists(): die(f"{self.dir} 里没有 explore.toml（先 explore init，或用 --run 指定战役目录）")
         self.c = tomllib.loads(f.read_text())
-        self.rule = {"pairs": 4, "win": 85, "guard": 5, "floor": 0, "max_load": 0, **self.c.get("rules", {})}
+        self.rule = {"pairs": 10, "alpha": 0.05, "guard": 5, "floor": 0, "max_load": 0, **self.c.get("rules", {})}
+        self.base = self.path("base_worktree"); self.strict = bool(self.c.get("strict"))
 
-    def path(self, key):
-        v = self.c.get(key) or die(f"explore.toml 缺 {key}")
-        return (self.dir / v).resolve()
-
+    def path(self, key): return (self.dir / (self.c.get(key) or die(f"explore.toml 缺 {key}"))).resolve()
     def cmd(self, name): return self.c.get("commands", {}).get(name, "")
+    def wt(self, eid): return P(f"{self.dir}-{eid}")
 
     def state(self, **kw):
-        f = self.dir / "state.json"
-        s = json.loads(f.read_text()) if f.exists() else {}
+        f = self.dir / "state.json"; s = json.loads(f.read_text()) if f.exists() else {}
         if kw: s.update(kw); f.write_text(json.dumps(s, ensure_ascii=False, indent=1))
         return s
 
@@ -149,35 +166,54 @@ class Run:
         f = self.dir / name
         return [json.loads(x) for x in f.read_text().splitlines() if x.strip()] if f.exists() else []
 
-    def envprint(self):
-        text = f"{platform.platform()} {platform.machine()}\n"
+    def last(self): return {r["id"]: r for r in self.rows("ledger.jsonl") if r["status"] not in ("改合同", "快照")}   # 每个实验最新的一行
+
+    def identity(self):
+        """测量的身份：命令、规则、环境。变了，旧的校准和旧的测量都不算数。"""
+        env = platform.platform() + platform.machine()
         if self.cmd("env"):
-            rc, out = sh(self.cmd("env"), self.dir)
-            if rc: die(f"commands.env 退出码 {rc}：{out[-300:]}")
-            text += out
-        return text.strip()
+            rc, text = sh(self.cmd("env"), self.base)
+            if rc: die(f"commands.env 退出码 {rc}：{text[-300:]}")
+            env += text
+        blob = json.dumps([self.cmd("build"), self.cmd("measure"), self.rule, env], sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(blob.encode()).hexdigest()[:10]
+
+    def calibrated(self):
+        aa = self.state().get("aa")
+        if not aa: return None, "还没校准：explore aa"
+        if aa["identity"] != self.identity(): return None, "测量命令、规则或环境变了，旧的校准不算数：explore aa"
+        return aa, ""
+
+
+@contextlib.contextmanager
+def machine_lock(held=[]):
+    """一台机器同时只有一个测量或落地。可重入。"""
+    if held: yield; return
+    f = P.home() / ".cache/explore-loop/measure.lock"; f.parent.mkdir(parents=True, exist_ok=True)
+    with open(f, "w") as lk:
+        print("等测量锁（一台机器同时只量一个）…", file=sys.stderr); fcntl.flock(lk, fcntl.LOCK_EX); held.append(1)
+        try: yield
+        finally: held.pop()
 
 
 def fingerprint(path):
-    """路径下每个文件的 (大小, 修改时间)。不读内容：模型权重目录也能秒出。"""
     p = P(path)
+    if not p.exists(): return None
     files = [p] if p.is_file() else [f for f in p.rglob("*") if f.is_file() and ".git" not in f.parts]
     return {str(f.relative_to(p)) if f != p else ".": [f.stat().st_size, f.stat().st_mtime_ns] for f in files}
 
 
 def locked_changes(R):
-    f = R.dir / "locked.json"
-    old = json.loads(f.read_text()) if f.exists() else {}
-    out = []
+    f = R.dir / "locked.json"; old = json.loads(f.read_text()) if f.exists() else {}; out = []
     for path in R.c.get("locked", []):
         new, was = fingerprint((R.dir / path).resolve()), old.get(path)
-        if was is None: out.append(f"{path}：没有快照（explore doctor --snapshot）"); continue
-        out += [f"{path}/{k}" for k in sorted(set(new) | set(was)) if new.get(k) != was.get(k)]
+        if new is None: out.append(f"{path}：不存在")
+        elif was is None: out.append(f"{path}：没有快照（explore doctor --snapshot）")
+        else: out += [f"{path}/{k}" for k in sorted(set(new) | set(was)) if new.get(k) != was.get(k)]
     return out
 
 
 def block(path):
-    """文件里最后一个 ```json 代码块。"""
     m = re.findall(r"```json\s*\n(.*?)\n```", P(path).read_text(), re.S)
     if not m: die(f"{path}：没有 ```json 块")
     try: return json.loads(m[-1])
@@ -188,8 +224,8 @@ def check(path):
     b = block(path); kind = b.get("kind")
     errs = [f"缺 {k}" for k in NEED[kind] if k not in b] if kind in NEED else [f"kind 必须是 {' / '.join(NEED)}"]
     items = b.get("items", b.get("findings", [])) if kind in ITEM else []
-    for i, it in enumerate(items):
-        errs += [f"第 {i + 1} 项缺 {k}" for k in ITEM[kind] if k not in it]
+    for i, it in enumerate(items): errs += [f"第 {i + 1} 项缺 {k}" for k in ITEM[kind] if k not in it]
+    if kind == "contract" and not errs: errs += [f"{k} 不能空" for k in ("targets", "allowed") if not b[k]]
     if kind == "proposals" and not items and not b.get("exhausted"): errs.append("没有提案时要写 exhausted（这条路到头了的证据）")
     if kind == "review" and not b.get("checked"): errs.append("checked 不能空：没有发现也要列出查过什么")
     if kind in ITEM and not any(l in P(path).read_text() for l in LABELS): errs.append(f"正文没有证据等级标签（{' '.join(LABELS)}）")
@@ -198,176 +234,191 @@ def check(path):
 
 def contract(R, eid):
     f = R.dir / "experiments" / f"{eid}.md"
-    if not f.exists(): die(f"没有合同 {f}")
+    if not f.exists(): die(f"没有合同 {f}（explore new）")
     b, errs = check(f)
     if errs or b.get("kind") != "contract" or b["id"] != eid: die(f"{f} 的 json 块不合格：{'；'.join(errs) or 'kind / id 不对'}")
-    return b
-
-
-def scope(R, eid, wt):
-    allowed = contract(R, eid)["allowed"]
-    changed = git(wt, "diff", "--name-only", f"{R.c['branch']}...HEAD").splitlines()
-    return [f for f in changed if not any(fnmatch.fnmatch(f, g) for g in allowed)], changed
+    return b, hashlib.sha256(json.dumps(b, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:10]
 
 
 # ---------- 测量 ----------
 
-def ab(R, base, cand, out, pairs=None, allow_dirty=False):
-    out = P(out).resolve(); sides = {"base": P(base).resolve(), "cand": P(cand).resolve()}
-    if out.exists() and any(out.iterdir()): die(f"{out} 已经有东西：换个目录，不覆盖证据")
-    stamp = {"time": now(), "by": os.environ.get("EXPLORE_ROLE", ""), "command": R.cmd("measure"), "loads": []}
-    for k, wt in sides.items():
-        dirty = git(wt, "status", "--porcelain")
-        if dirty and not allow_dirty: die(f"{wt} 有未提交或未跟踪的文件：量到的东西对不上任何提交。提交它们；构建和测试的产物加进 .gitignore\n{dirty[:400]}")
-        stamp[k] = {"wt": str(wt), "sha": git(wt, "rev-parse", "HEAD"), "dirty": bool(dirty)}
+def clean(wt):
+    dirty = git(wt, "status", "--porcelain")
+    return f"{wt} 有未提交或未跟踪的文件：量到的东西对不上任何提交。提交它们；构建和测试的产物加进 .gitignore\n{dirty[:400]}" if dirty else ""
+
+
+def measure(R, base, cand, tag, pairs=None, redo=""):
+    """成对测量 base 和 cand（都是干净的 worktree）。同样的提交、同样的测量身份量过就直接复用。返回 (目录, data)。"""
+    base, cand = P(base).resolve(), P(cand).resolve(); n = pairs or R.rule["pairs"]
+    for wt in (base, cand): clean(wt) and die(clean(wt))
+    shas = {"base": git(base, "rev-parse", "HEAD"), "cand": git(cand, "rev-parse", "HEAD")}; ident = R.identity()
+    out = R.dir / "measure" / f"{tag}-{shas['base'][:8]}-{shas['cand'][:8]}-{ident}-n{n}"
+    if redo: out = P(f"{out}-{datetime.datetime.now():%m%d%H%M%S}")
+    if (out / "stamp.json").exists():
+        print(f"复用已有的测量 {out.relative_to(R.dir)}（提交和测量身份都没变）", file=sys.stderr); return out, load(out)
+    if out.exists(): shutil.rmtree(out)   # 上次没量完的残留
     if not R.cmd("measure"): die("explore.toml 缺 commands.measure")
-    lock = P.home() / ".cache/explore-loop/measure.lock"; lock.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock, "w") as lk:
-        print("等测量锁（一台机器同时只量一个）…", file=sys.stderr); fcntl.flock(lk, fcntl.LOCK_EX)
+    stamp = {"time": now(), "identity": ident, "pairs": n, "redo": redo, "loads": [], **{k: {"wt": str(w), "sha": shas[k]} for k, w in (("base", base), ("cand", cand))}}
+    rng = random.Random(shas["base"] + shas["cand"])
+    with machine_lock():
         def quiet():
             text = sh(R.cmd("busy"), R.dir)[1].strip() if R.cmd("busy") else ""
             if text: die(f"机器上有别的负载，这次测量作废（已有的几遍不算数）：\n{text}", 2)
-        quiet(); stamp["env"] = R.envprint()
-        for wt, k in ({str(w): n for n, w in reversed(sides.items())}.items() if R.cmd("build") else []):  # 同一个目录只构建一次
-            rc, text = sh(R.cmd("build"), wt, out / k / "build.log")
-            if rc: die(f"构建失败（{wt}，退出码 {rc}），见 {out / k / 'build.log'}")
-        for i in range(1, (pairs or R.rule["pairs"]) + 1):
-            for k in (("base", "cand") if i % 2 else ("cand", "base")):  # 轮流谁先，抵消漂移
-                quiet(); la = os.getloadavg()[0]; stamp["loads"].append(round(la, 1))
-                if R.rule["max_load"] and la > R.rule["max_load"]: die(f"负载 {la:.0f} 超过 max_load {R.rule['max_load']}，这次测量作废", 2)
-                rc, text = sh(R.cmd("measure"), sides[k], out / k / f"run-{i}.log", {"EXPLORE_RUN": str(R.dir)})
+            la = os.getloadavg()[0]; stamp["loads"].append(round(la, 1))
+            if R.rule["max_load"] and la > R.rule["max_load"]: die(f"负载 {la:.0f} 超过 max_load {R.rule['max_load']}，这次测量作废", 2)
+        quiet()
+        for wt, k in ({str(base): "base", str(cand): "cand"}.items() if R.cmd("build") else []):   # 同一个目录只构建一次
+            if sh(R.cmd("build"), wt, out / k / "build.log")[0]: die(f"构建失败（{wt}），见 {out / k / 'build.log'}")
+        for i in range(1, n + 1):
+            for k in rng.sample(("base", "cand"), 2):   # 每对随机谁先
+                quiet()
+                rc, text = sh(R.cmd("measure"), base if k == "base" else cand, out / k / f"run-{i}.log", {"EXPLORE_RUN": str(R.dir)})
                 if rc: die(f"第 {i} 对 {k} 退出码 {rc}，见 {out / k / f'run-{i}.log'}")
-                if not parse(text): die(f"第 {i} 对 {k} 没有任何指标行，见 {out / k / f'run-{i}.log'}")
-                print(f"第 {i} 对 {k}：{len(parse(text))} 个指标", file=sys.stderr)
-    (out / "stamp.json").write_text(json.dumps(stamp, ensure_ascii=False, indent=1))
-    return judge([out / "base"], [out / "cand"], R.rule, out), stamp
-
-
-def env_of(d):
-    f = P(d).resolve().parent / "stamp.json"
-    return json.loads(f.read_text()).get("env") if f.exists() else None
+            print(f"第 {i}/{n} 对", file=sys.stderr)
+        for k, wt in (("base", base), ("cand", cand)):   # 量完再核一次：量的还是那个提交吗
+            if git(wt, "rev-parse", "HEAD") != shas[k] or clean(wt): die(f"测量期间 {wt} 变了（提交或文件），这次测量作废。测量命令会写文件的话，把产物加进 .gitignore")
+    data = load(out); (out / "stamp.json").write_text(json.dumps(stamp, ensure_ascii=False, indent=1))
+    return out, data
 
 
 # ---------- 子命令 ----------
 
 def c_init(a):
     """战役目录是目标仓库里一条独立分支（没有产品代码）的 worktree：被 git 跟踪，又不在主检出和任何被测的 worktree 里。"""
-    d = P(a.dir).resolve(); repo = P(a.repo).resolve(); name = d.name; base = d.parent / f"{name}-base"
+    d = P(a.dir).resolve(); repo = P(a.repo).resolve(); name = d.name; base = P(f"{d}-base")
     if d.exists() or base.exists(): die(f"{d} 或 {base} 已经存在")
     git(repo, "worktree", "add", "-q", "--orphan", "-b", f"explore/{name}-log", str(d))
     git(repo, "worktree", "add", "-q", "-b", f"explore/{name}-base", str(base), a.start)
-    for sub in ("experiments", "rounds", "measure"): (d / sub).mkdir(); (d / sub / ".gitkeep").touch()
-    for f in ("explore.toml", "profile.md", "ledger.md", "team.md"): shutil.copy(HERE / "templates" / f, d / f)
-    t = (d / "explore.toml").read_text().replace("<REPO>", str(repo)).replace("<BRANCH>", f"explore/{name}-base").replace("<BASE>", str(base))
-    (d / "explore.toml").write_text(t)
+    for sub in ("experiments", "measure"): (d / sub).mkdir(); (d / sub / ".gitkeep").touch()
+    for f in ("explore.toml", "profile.md", "ledger.md"): shutil.copy(HERE / "templates" / f, d / f)
+    t = (d / "explore.toml").read_text()
+    for k, v in (("<REPO>", str(repo)), ("<BRANCH>", f"explore/{name}-base"), ("<BASE>", str(base)), ("<BUILD>", a.build), ("<MEASURE>", a.measure), ("<TEST>", a.test)):
+        t = t.replace(k, v.replace("\\", "\\\\").replace('"', '\\"'))
+    (d / "explore.toml").write_text(t); tomllib.loads(t)
     git(d, "add", "-A"); git(d, "commit", "-q", "-m", f"explore: start campaign {name}")
-    print(f"战役目录 {d}（分支 explore/{name}-log）\n基线 worktree {base}（分支 explore/{name}-base，起点 {a.start}）\n"
-          "下一步：填 explore.toml 和 profile.md → explore doctor --snapshot → explore aa。战役目录里的改动随时提交")
+    print(f"战役目录 {d}（分支 explore/{name}-log）\n基线 worktree {base}（分支 explore/{name}-base，起点 {a.start}）\n下一步：cd {d} && explore aa")
+
+
+def static(R):
+    """不用跑任何东西就能查的配置问题。land 每次都查。"""
+    errs = [f"commands.{n} 是空的" for n in ("measure", "test") if not R.cmd(n)]
+    if not R.base.is_dir(): return errs + [f"base_worktree {R.base} 不存在"]
+    if git(R.base, "rev-parse", "--abbrev-ref", "HEAD") != R.c.get("branch"): errs.append(f"base_worktree 检出的不是战役分支 {R.c.get('branch')}")
+    for d in R.c.get("datasets", []):
+        if d.get("role") not in ("train", "select", "accept", "final"): errs.append(f"数据集 {d.get('name')} 的 role 要是 train / select / accept / final")
+        if not (d.get("strata") and d.get("leak")): errs.append(f"数据集 {d.get('name')} 要写 strata（分布、来源、调过什么）和 leak（与训练或先验数据同源吗）")
+        p = (R.dir / d.get("path", "")).resolve()
+        if d.get("role") == "final" and any(p.is_relative_to(x) for x in (R.path("repo"), R.base)): errs.append(f"留出集 {d['name']} 在仓库或基线 worktree 里（{p}）")
+    return errs
 
 
 def c_doctor(a):
-    R = Run(a.run); fails = []
-    def ok(cond, msg):
-        print(("ok    " if cond else "FAIL  ") + msg); cond or fails.append(msg)
-    repo, base = R.path("repo"), R.path("base_worktree")
-    ok(repo.is_dir(), f"repo {repo}"); ok(base.is_dir(), f"base_worktree {base}")
-    if base.is_dir(): ok(git(base, "rev-parse", "--abbrev-ref", "HEAD") == R.c.get("branch"), f"base_worktree 检出的是战役分支 {R.c.get('branch')}")
-    for n in ("measure", "test"): ok(bool(R.cmd(n)), f"commands.{n}")
-    for n in ("build", "env", "busy"): print(("ok    " if R.cmd(n) else "仅文字 ") + f"commands.{n}")
-    print(("ok    " if R.c.get("invariants") else "仅文字 ") + f"invariants：{len(R.c.get('invariants', []))} 条可执行检查")
-    for d in R.c.get("datasets", []):
-        ok(d.get("role") in ("train", "select", "accept", "final"), f"数据集 {d.get('name')} 的 role 是 train / select / accept / final 之一")
-        p = (R.dir / d.get("path", "")).resolve()
-        ok(bool(d.get("strata")) and bool(d.get("leak")), f"数据集 {d.get('name')} 写了 strata（分布、来源、调过什么）和 leak（与训练或先验数据同源吗）")
-        if d.get("role") == "final": ok(not any(p.is_relative_to(x) for x in (repo, base)), f"留出集 {d['name']} 不在仓库和基线 worktree 里（{p}）")
+    R = Run(a.run); errs = static(R)
     if a.snapshot:
         (R.dir / "locked.json").write_text(json.dumps({p: fingerprint((R.dir / p).resolve()) for p in R.c.get("locked", [])}))
-        print(f"ok    记下 {len(R.c.get('locked', []))} 个 locked 路径的指纹")
-    else:
-        ch = locked_changes(R); ok(not ch, "locked 路径没变" + ("：" + "，".join(ch[:10]) if ch else ""))
-    ok(bool(R.state().get("aa")), "基线对基线量过（explore aa）")
-    sys.exit(1 if fails else 0)
+        R.log("ledger.jsonl", {"id": "-", "title": "重记 locked 指纹", "status": "快照"})
+    errs += locked_changes(R); errs += [R.calibrated()[1]] if R.calibrated()[1] else []
+    for e in errs: print("FAIL  " + e)
+    for n, on in (("build", R.cmd("build")), ("env（环境指纹）", R.cmd("env")), ("busy（机器忙不忙）", R.cmd("busy")), ("invariants", R.c.get("invariants")),
+                  ("locked", R.c.get("locked")), ("strict（落地要评审）", R.strict)):
+        print(("ok    " if on else "没设  ") + n)
+    print("配置没问题" if not errs else f"{len(errs)} 个问题"); sys.exit(1 if errs else 0)
 
 
 def c_aa(a):
-    R = Run(a.run); base = R.path("base_worktree")
-    out = R.dir / "measure" / f"AA-{git(base, 'rev-parse', '--short', 'HEAD')}-{datetime.datetime.now():%m%d%H%M%S}-{os.getpid()}"
-    rows, stamp = ab(R, base, base, out, a.pairs, a.allow_dirty)
-    noisy = [r["metric"] for r in rows if r["verdict"] not in ("噪声内", "相同")]
-    if noisy: die(f"同一份代码量出了差别：{'，'.join(noisy)}。先修测量（加遍数、设 floor、清场），再开实验")
-    R.state(aa={"time": stamp["time"], "sha": stamp["base"]["sha"], "dir": str(out.relative_to(R.dir))}, baseline=stamp["base"]["sha"])
-    print("A/A 通过：全部噪声内")
+    R = Run(a.run); static(R) and die("；".join(static(R)))
+    out, data = measure(R, R.base, R.base, "AA", a.pairs, a.redo or "")
+    noise, med, loud = {}, {}, []
+    print("| 指标 | 中位 | 噪声（成对差的九成分位） | 占中位 |\n|---|---|---|---|")
+    for k, x in sorted(data.items()):
+        if x["way"] == "exact":
+            if len(x["raw"]) > 1: die(f"exact 指标 {k} 在同一份代码上量出了不同的值：{sorted(x['raw'])[:4]}。它不是确定性的，不能当 exact")
+            continue
+        d = sorted(abs(y - z) for y, z in zip(x["b"], x["c"])); noise[k] = d[min(len(d) - 1, math.ceil(0.9 * len(d)) - 1)]; med[k] = statistics.median(x["b"])
+        pct = noise[k] / abs(med[k]) * 100 if med[k] else 0; loud += [k] if pct > R.rule["guard"] else []
+        print(f"| {k} | {med[k]:.4g} {x['unit']} | {noise[k]:.3g} | {pct:.1f}% |")
+    R.state(aa={"time": now(), "identity": R.identity(), "sha": git(R.base, "rev-parse", "HEAD"), "dir": str(out.relative_to(R.dir)), "noise": noise, "median": med}, baseline=git(R.base, "rev-parse", "HEAD"))
+    if loud: print(f"提示：{len(loud)} 个指标的噪声超过护栏的 {R.rule['guard']}%（{'，'.join(loud[:5])}）：它们的容忍度会自动抬到噪声那么大，比这小的回归看不出来。")
+    print(f"校准完成（{len(data)} 个指标）。想知道能看出多大的变化：explore power")
 
 
 def c_ab(a):
-    R = Run(a.run); rows, _ = ab(R, a.base, a.cand, a.out, a.pairs, a.allow_dirty)
-    sys.exit(1 if bad(rows) else 0)
+    R = Run(a.run); aa, why = R.calibrated()
+    out, data = measure(R, a.base, a.cand, "ab", a.pairs)
+    rows = judge(data, R.rule, noise=(aa or {}).get("noise"), out=out)
+    if why: print("注意：" + why + "（这次没用上噪声校准）")
+    sys.exit(1 if blockers(rows, []) else 0)
 
 
-def c_pool(a):
-    R = Run(a.run) if (P(a.run) / "explore.toml").exists() else None
-    envs = {e for e in map(env_of, a.base + a.cand) if e}
-    if len(envs) > 1 and not a.allow_env_diff: die("两边的环境指纹不一样，不比（确认要比就加 --allow-env-diff，并在结论里写明）")
-    rule = {"win": 85, "guard": 5, "floor": 0, **(R.rule if R else {}), **{k: v for k in ("win", "guard", "floor") if (v := getattr(a, k)) is not None}}
-    sys.exit(1 if bad(judge(a.base, a.cand, rule)) else 0)
-
-
-def c_check(a):
-    n = 0
-    for f in a.files:
-        b, errs = check(f); n += bool(errs)
-        print(f"{'FAIL' if errs else 'ok  '}  {f}（{b.get('kind')}）" + "".join(f"\n      {e}" for e in errs))
-    sys.exit(1 if n else 0)
-
-
-def c_scope(a):
-    out, changed = scope(Run(a.run), a.id, a.wt)
-    print(f"改了 {len(changed)} 个文件，{len(out)} 个在合同之外" + "".join(f"\n  {f}" for f in out))
-    sys.exit(1 if out else 0)
+def c_new(a):
+    R = Run(a.run); aa, why = R.calibrated(); aa or die(why)
+    ids = [int(m[1]) for f in (R.dir / "experiments").glob("E*.md") if (m := re.match(r"E(\d+)\.md", f.name))]
+    eid = a.id or f"E{max(ids, default=0) + 1:03d}"; wt = R.wt(eid); f = R.dir / "experiments" / f"{eid}.md"
+    if f.exists() or wt.exists(): die(f"{eid} 已经存在")
+    miss = [t for t in a.target if t not in aa["median"]]
+    if miss: die(f"目标 {miss} 不在校准量到的指标里。有的是：{'，'.join(sorted(aa['median']))}")
+    k = {"kind": "contract", "id": eid, "title": a.title, "targets": a.target, "allowed": a.allow,
+         "predict": {t: [round(aa["median"][t], 6), a.predict] for t in a.target}, "min_gain": {}}
+    branch = re.sub(r"-base$", "", R.c["branch"]) + f"-{eid}"
+    git(R.base, "worktree", "add", "-q", "-b", branch, str(wt), R.c["branch"])
+    f.write_text((HERE / "templates" / "experiment.md").read_text().replace("<ID>", eid).replace("<TITLE>", a.title).replace("<DATE>", now()[:10])
+                 .replace("<SHA>", git(R.base, "rev-parse", "--short", "HEAD")).replace("<JSON>", json.dumps(k, ensure_ascii=False, indent=1)))
+    print(f"{eid}：合同 {f}\n      worktree {wt}（分支 {branch}）\n写完假设和不变量后，在 worktree 里实现、提交，然后 explore land {eid} --dry-run")
 
 
 def c_land(a):
-    R = Run(a.run); eid = a.id; wt = P(a.wt).resolve(); base = R.path("base_worktree"); k = contract(R, eid)
+    R = Run(a.run); eid = a.id; wt = P(a.wt).resolve() if a.wt else R.wt(eid); k, khash = contract(R, eid); out = None
     def step(name, fails):
         print(("ok    " if not fails else "FAIL  ") + name + "".join(f"\n      {f}" for f in fails[:10]))
-        if fails: die(f"{eid} 不落地：{name}")
-    step("做过基线对基线", [] if R.state().get("aa") else ["先 explore aa"])
-    sha, tip = git(wt, "rev-parse", "HEAD"), git(base, "rev-parse", "HEAD")
-    step("候选包含当前基线", [] if git(wt, "merge-base", "HEAD", tip) == tip else [f"基线已经走到 {tip[:8]}：先把战役分支合进候选再量，否则基线后来的改进会算成候选的回归"])
-    step("改动在合同范围内", scope(R, eid, wt)[0])
-    step("locked 路径没变", locked_changes(R))
-    rc, _ = sh(R.cmd("test"), wt, R.dir / "measure" / f"{eid}-land" / "test.log")
-    step("测试", [] if not rc else [f"退出码 {rc}，见 measure/{eid}-land/test.log"])
-    for i, inv in enumerate(R.c.get("invariants", [])):
-        rc, _ = sh(inv["cmd"], wt, R.dir / "measure" / f"{eid}-land" / f"invariant-{i + 1}.log", {"EXPLORE_BASE": str(base)})
-        step(f"不变量：{inv['name']}", [] if not rc else [f"退出码 {rc}，见 measure/{eid}-land/invariant-{i + 1}.log"])
-    rf = R.dir / "experiments" / f"{eid}.review.md"
-    rv, errs = check(rf) if rf.exists() else ({}, [f"没有 {rf.name}"])
-    if rf.exists() and (rv.get("kind") != "review" or rv.get("target") != eid): errs.append(f"要的是 kind=review、target={eid} 的块")
-    if not errs:
-        errs = ([f"评审的是 {rv['sha'][:8]}，候选现在是 {sha[:8]}：改过就要重新评审"] if not sha.startswith(rv["sha"]) or len(rv["sha"]) < 7 else []) + \
-               [f"挡合并：{f['where']}（{f['input']}）" for f in rv["findings"] if f["blocking"]]
-    if a.dry_run and errs: print("跳过  第三方评审（--dry-run）：" + errs[0])
-    else: step("第三方评审：针对这个提交，没有挡合并的发现", errs)
-    out = R.dir / "measure" / f"{eid}-land" / f"{sha[:8]}-{datetime.datetime.now():%m%d%H%M%S}-{os.getpid()}"
-    rows, _ = ab(R, base, wt, out)
-    by = {r["metric"]: r for r in rows}
-    miss = [f"目标 {t}：{by.get(t, {}).get('verdict', '没量到')}" for t in k["targets"] if by.get(t, {}).get("verdict") != "变好"] + [f"{m}：{by[m]['verdict']}" for m in bad(rows)]
-    if miss and a.owner_ok: print("破例  判定规则没过，所有者批准：" + a.owner_ok + "".join(f"\n      {m}" for m in miss))
-    else: step("判定规则：目标变好，其余无回归", miss)
-    row = {"id": eid, "title": k["title"], "status": "接受", "sha": sha, "base": tip, "measure": str(out.relative_to(R.dir)), "exception": a.owner_ok if miss else None,
-           "targets": {t: {"predicted": k["predict"].get(t), "base": by[t]["base"], "cand": by[t]["cand"], "verdict": by[t]["verdict"]} for t in k["targets"] if t in by and "base" in by[t]},
-           "moved": {m: r["verdict"] for m, r in by.items() if m not in k["targets"] and r["verdict"] not in ("噪声内", "相同")}}
-    if a.dry_run: print("全部通过（--dry-run，没有合并）"); return
-    git(base, "merge", "--ff-only", sha)  # 快进：基线的提交就是刚量过的那个提交
-    R.log("ledger.jsonl", row); R.state(baseline=sha)
-    print(f"{eid} 落地：{R.c['branch']} → {sha[:8]}。把事实和陷阱写进 ledger.md；这次测量的候选一侧就是新基线的数字")
+        if not fails: return
+        if not a.dry_run: R.log("ledger.jsonl", {"id": eid, "title": k["title"], "status": "拦下", "step": name, "why": fails[:5], "measure": out and str(out.relative_to(R.dir))})
+        die(f"{eid} 不落地：{name}")
+    def common(w): return P(git(w, "rev-parse", "--path-format=absolute", "--git-common-dir", ok=True) or "/nonexistent")
+    with machine_lock():
+        step("配置", static(R) + ([] if wt.is_dir() and common(wt) == common(R.base) else [f"{wt} 不是这个仓库的 worktree"]))
+        frozen = R.state().get("contracts", {})
+        if frozen.get(eid, khash) != khash and not a.amend: step("合同没被改过", ["合同的 json 块在第一次过闸门之后改过。确实要改：--amend \"理由\"（会记账）"])
+        if frozen.get(eid) != khash:
+            R.state(contracts={**frozen, eid: khash})
+            if a.amend: R.log("ledger.jsonl", {"id": eid, "title": k["title"], "status": "改合同", "why": a.amend})
+        aa, why = R.calibrated(); step("校准有效", [why] if why else [])
+        sha, tip = git(wt, "rev-parse", "HEAD"), git(R.base, "rev-parse", "HEAD")
+        step("候选是干净的提交", [clean(wt)] if clean(wt) else [])
+        step("候选包含当前基线", [] if git(wt, "merge-base", "HEAD", tip) == tip else [f"基线已经走到 {tip[:8]}：先把战役分支合进候选，否则基线后来的改进会算成候选的回归"])
+        changed = git(wt, "diff", "--name-only", f"{tip}...HEAD").splitlines()
+        step("改动在合同范围内", [f for f in changed if not any(fnmatch.fnmatch(f, g) for g in k["allowed"])] or ([] if changed else ["候选和基线没有差别"]))
+        step("locked 路径没变", locked_changes(R))
+        logs = R.dir / "measure" / f"{eid}-land"
+        step("测试", [f"退出码非 0，见 {logs / 'test.log'}"] if sh(R.cmd("test"), wt, logs / "test.log")[0] else [])
+        for i, inv in enumerate(R.c.get("invariants", [])):
+            step(f"不变量：{inv['name']}", [f"退出码非 0，见 {logs / f'invariant-{i + 1}.log'}"] if sh(inv["cmd"], wt, logs / f"invariant-{i + 1}.log", {"EXPLORE_BASE": str(R.base)})[0] else [])
+        if R.strict:
+            rf = R.dir / "experiments" / f"{eid}.review.md"; rv, errs = check(rf) if rf.exists() else ({}, [f"没有 {rf.name}"])
+            if rf.exists() and (rv.get("kind") != "review" or rv.get("target") != eid): errs.append(f"要的是 kind=review、target={eid} 的块")
+            if not errs:   # 评审的提交和候选的代码树相同才算数（只改提交说明不用重审）
+                same = git(wt, "rev-parse", f"{rv['sha']}^{{tree}}", ok=True) == git(wt, "rev-parse", "HEAD^{tree}")
+                errs = ([] if same else [f"评审的是 {rv['sha'][:8]}，候选现在是 {sha[:8]}，代码不一样：重新评审"]) + [f"挡合并：{f['where']}（{f['input']}）" for f in rv["findings"] if f["blocking"]]
+            if a.dry_run and errs: print("跳过  评审（--dry-run）：" + errs[0])
+            else: step("评审：针对这份代码，没有挡合并的发现", errs)
+        out, data = measure(R, R.base, wt, eid, redo=a.remeasure or "")
+        step("目标指标量到了", [f"没有指标 {t}" for t in k["targets"] if t not in data])
+        rows = judge(data, R.rule, k["targets"], k.get("min_gain"), aa["noise"], out); by = {r["metric"]: r for r in rows}; bad = blockers(rows, k["targets"])
+        if bad and a.owner_ok: print("破例  判定没过，所有者批准：" + a.owner_ok + "".join(f"\n      {m}" for m in bad))
+        else: step("判定：目标变好，其余没有回归", bad)
+        step("过闸门期间什么都没变", ([] if git(wt, "rev-parse", "HEAD") == sha and not clean(wt) else ["候选变了"]) + ([] if git(R.base, "rev-parse", "HEAD") == tip else ["基线变了"]) + locked_changes(R))
+        row = {"id": eid, "title": k["title"], "status": "接受", "sha": sha, "base": tip, "measure": str(out.relative_to(R.dir)), "contract": khash,
+               "exception": a.owner_ok if bad else None, "remeasure": a.remeasure,
+               "targets": {t: {"predicted": (k.get("predict", {}).get(t) or [None, None])[1], "base": by[t].get("base"), "cand": by[t].get("cand"), "verdict": by[t]["verdict"]} for t in k["targets"]},
+               "moved": {m: r["verdict"] for m, r in by.items() if not r.get("target") and r["verdict"] not in ("证据不足", "相同")}}
+        if a.dry_run: print("全部通过（--dry-run，没有合并；正式落地会复用这次测量）"); return
+        git(R.base, "merge", "--ff-only", sha)   # 快进：基线的提交就是刚量过的那个提交
+        R.log("ledger.jsonl", row); R.state(baseline=sha)
+    print(f"{eid} 落地：{R.c['branch']} → {sha[:8]}。有新的事实或陷阱就写进 ledger.md")
 
 
 def c_close(a):
-    R = Run(a.run); k = contract(R, a.id)
-    R.log("ledger.jsonl", {"id": a.id, "title": k["title"], "status": a.status, "why": a.why, "predicted": k["predict"]})
-    print(f"{a.id} 记为{a.status}")
+    R = Run(a.run); k, _ = contract(R, a.id)
+    R.log("ledger.jsonl", {"id": a.id, "title": k["title"], "status": a.status, "why": a.why, "predict": k.get("predict")}); print(f"{a.id} 记为{a.status}")
 
 
 def c_holdout(a):
@@ -378,29 +429,82 @@ def c_holdout(a):
     sys.exit(subprocess.run(a.cmd, env={**os.environ, "EXPLORE_DATA": str((R.dir / d["path"]).resolve())}).returncode)
 
 
+def c_next(a):
+    R = Run(a.run); errs = static(R); last = R.last()
+    if errs: return print("先修配置：\n  " + "\n  ".join(errs))
+    aa, why = R.calibrated()
+    if not aa: return print(why)
+    todo = [f.stem for f in sorted((R.dir / "experiments").glob("E*.md")) if not f.name.endswith(".review.md") and last.get(f.stem, {}).get("status") not in DONE]
+    for eid in todo:
+        wt = R.wt(eid); row = last.get(eid); ahead = git(wt, "rev-list", "--count", f"{R.c['branch']}..HEAD", ok=True) if wt.is_dir() else ""
+        if not wt.is_dir(): msg = f"worktree {wt} 不在了：重建它，或 explore close {eid} --as 放弃 --why …"
+        elif ahead in ("", "0"): msg = f"还没有提交。在 {wt} 里实现并提交"
+        elif row and row["status"] == "拦下": msg = f"上次被拦在「{row['step']}」：{'；'.join(row['why'])[:160]}。修好后 explore land {eid}，或 explore close {eid} --as …"
+        elif R.strict and not (R.dir / "experiments" / f"{eid}.review.md").exists(): msg = f"explore land {eid} --dry-run，然后请评审写 experiments/{eid}.review.md"
+        else: msg = f"explore land {eid}"
+        print(f"{eid}：{msg}")
+    if not todo: print('没有进行中的实验。开一个：explore new "标题" --target <指标> --allow <文件通配>')
+    dirty = git(R.dir, "status", "--porcelain", ok=True)
+    if dirty: print(f"战役目录有 {len(dirty.splitlines())} 个没提交的文件：git -C {R.dir} add -A && git -C {R.dir} commit -m …")
+
+
 def c_status(a):
-    R = Run(a.run); s = R.state()
-    print(f"基线 {s.get('baseline', '未量')[:8]}　A/A {s.get('aa', {}).get('time', '没做')}")
-    print("| 编号 | 处置 | 标题 | 预测 → 实测 |\n|---|---|---|---|")
-    for r in R.rows("ledger.jsonl"):
-        t = "；".join(f"{m}: {v['predicted']} → {v['cand']:.4g}" for m, v in r.get("targets", {}).items()) or r.get("why", "")
-        print(f"| {r['id']} | {r['status']}{'（破例）' if r.get('exception') else ''} | {r['title']} | {t} |")
-    for d in R.c.get("datasets", []):
-        print(f"数据集 {d['name']}（{d['role']}）：用过 {sum(r['name'] == d['name'] for r in R.rows('holdout.jsonl'))} 次")
+    R = Run(a.run); s = R.state(); rows = R.rows("ledger.jsonl")
+    print(f"基线 {s.get('baseline', '未量')[:8]}　校准 {s.get('aa', {}).get('time', '没做')}　模式 {'strict（落地要评审）' if R.strict else 'quick'}")
+    print("| 编号 | 处置 | 标题 | 目标：基线 → 预测 / 实测 | 被拦次数 |\n|---|---|---|---|---|")
+    for eid, r in R.last().items():
+        why = r.get("why", ""); why = "；".join(why) if isinstance(why, list) else why
+        t = "；".join(f"{m} {v['base']:.4g} → {v['predicted']} / {v['cand']:.4g}" for m, v in r.get("targets", {}).items() if v.get("base") is not None) or why[:80]
+        print(f"| {eid} | {r['status']}{'（破例）' if r.get('exception') else ''}{'（重量过）' if r.get('remeasure') else ''} | {r['title']} | {t} | {sum(x['id'] == eid and x['status'] == '拦下' for x in rows)} |")
+    for d in R.c.get("datasets", []): print(f"数据集 {d['name']}（{d['role']}）：用过 {sum(r['name'] == d['name'] for r in R.rows('holdout.jsonl'))} 次")
+
+
+def c_power(a):
+    """模拟：这套判定在给定噪声下，什么都没变时误拦多少，真有变化时看出多少。"""
+    R = Run(a.run) if (P(a.run) / "explore.toml").exists() else None; aa = R.calibrated()[0] if R else None
+    rule = {"pairs": 10, "alpha": 0.05, "guard": 5, **(R.rule if R else {})}; n = a.pairs or rule["pairs"]; Z = 1.645 * math.sqrt(2)   # 成对差的九成分位 ≈ Z × 单次离散
+    if aa and a.noise is None: cvs = [aa["noise"][k] / abs(aa["median"][k]) / Z for k in aa["noise"] if aa["median"][k]]; src = "校准量到的噪声"
+    else: cvs = [(a.noise if a.noise is not None else 3) / 100] * (a.metrics or 15); src = f"假设每个指标单次测量的离散是 {a.noise if a.noise is not None else 3}%"
+    m = len(cvs); cut = rule["alpha"] / m; rng = random.Random(1); T = 2000
+    if n < need_pairs(m, rule["alpha"]): die(f"{m} 个指标至少要 {need_pairs(m, rule['alpha'])} 对")
+    def one(cv, shift, target):
+        b = [rng.gauss(1, cv) for _ in range(n)]; c = [rng.gauss(1 + shift, cv) for _ in range(n)]; loss = max(rule["guard"] / 100, cv * Z)
+        return decide(b, c, "lower", 0, loss, cut)[0]
+    wrong = sum(any(one(cv, 0, False) == "回归" for cv in cvs) for _ in range(T)) / T
+    print(f"{src}；{m} 个指标，{n} 对，alpha {rule['alpha']}，护栏 {rule['guard']}%。每格模拟 {T} 次。")
+    print(f"什么都没变时，被护栏误拦的概率：{wrong:.1%}\n| 真实变化 | 目标被判变好 | 护栏被判回归 |\n|---|---|---|")
+    cv = statistics.median(cvs)
+    for g in (2, 5, 10, 20):
+        print(f"| {g}% | {sum(one(cv, -g / 100, True) == '变好' for _ in range(T)) / T:.0%} | {sum(one(cv, g / 100, False) == '回归' for _ in range(T)) / T:.0%} |")
+    print("看不出想要的变化：加 pairs，或降低测量噪声（清场、预热、加大工作负载）。")
+
+
+def c_check(a):
+    bad = 0
+    for f in a.files:
+        b, errs = check(f); bad += bool(errs)
+        print(f"{'FAIL' if errs else 'ok  '}  {f}（{b.get('kind')}）" + "".join(f"\n      {e}" for e in errs))
+    sys.exit(1 if bad else 0)
 
 
 def selftest():
-    got = parse("x\n2026 PERF open library 12.5 ms\nMETRIC higher top1 A 954 张\nMETRIC exact hash 42 -\nPERF n 9 species 3\n")
-    assert got == {"open library": (0.0125, "s", "lower"), "top1 A": (954.0, "张", "higher"), "hash": (42.0, "-", "exact")}, got
-    assert pooled([1.0, 1.1, 1.2, 1.3, 1.4, 5.0], [0.8, 0.82, 0.85, 0.88, 0.9, 4.0])[0] == "变好"   # 两边各一个离群值照样判得出
-    assert pooled([1.0, 1.1, 1.2], [0.9, 1.15, 1.3])[0] == "噪声内"
-    assert pooled([1.0, 1.1, 1.2], [1.5, 1.6, 1.7])[0] == "回归"
-    assert pooled([1.0, 1.0], [1.02, 1.02])[0] == "变差"                       # 变差但在 guard 内
-    assert pooled([0.0077] * 3, [0.0084] * 3, floor=0.001)[0] == "噪声内"       # 不到 1 毫秒：不判
-    assert pooled([954, 954], [956, 956], "higher")[0] == "变好" and pooled([954, 954], [940, 940], "higher")[0] == "变差" and pooled([954, 954], [800, 800], "higher")[0] == "回归"
-    assert pooled([42, 42], [42, 42], "exact")[0] == "相同" and pooled([42, 42], [42, 43], "exact")[0] == "不同"
-    assert round(pooled([1.0, 2.0], [1.0, 2.0])[2]) == 50                      # A/A：并列各算半个
-    assert fnmatch.fnmatch("src/a/b.py", "src/*") and not fnmatch.fnmatch("lib/x.py", "src/*")
+    got = parse("x\n2026 PERF open library 12.5 ms\nMETRIC higher top1 A 954 张\nMETRIC exact hash 9007199254740993 -\nPERF n 9 species 3\n")
+    assert got["open library"]["v"] == 0.0125 and got["top1 A"]["way"] == "higher" and got["hash"]["raw"] == "9007199254740993", got
+    assert tail(10, 10) == 1 / 1024 and abs(tail(17, 20) - 0.001288) < 1e-6
+    assert need_pairs(15, 0.05) == 9 and need_pairs(1, 0.05) == 5
+    cut = 0.05 / 15; b = [1.0] * 10
+    assert decide(b, [0.9] * 10, "lower", 0, 0.05, cut)[0] == "变好"
+    assert decide(b, [0.9] * 9 + [5.0], "lower", 0, 0.05, 0.05)[0] == "变好"          # 一个离群值打不破
+    assert decide(b, [1.2] * 10, "lower", 0, 0.05, cut)[0] == "回归"
+    assert decide(b, [1.02] * 10, "lower", 0, 0.05, cut)[0] == "变差"                 # 确实差了，但在容忍度内：不拦
+    assert decide(b, [0.99] * 10, "lower", 0.02, 0.05, cut)[0] == "证据不足"          # 好了，但没到 min_gain
+    assert decide(b, [1.2] * 6 + [0.99] * 4, "lower", 0, 0.05, cut)[0] == "可疑"      # 中位数越线但不显著
+    assert decide(b, [1.0] * 10, "lower", 0, 0.05, cut)[0] == "证据不足"              # 一模一样
+    assert decide([954] * 10, [956] * 10, "higher", 0, 3, cut)[0] == "变好" and decide([954] * 10, [940] * 10, "higher", 0, 3, cut)[0] == "回归"
+    assert decide([0.0] * 10, [1.0] * 10, "lower", 0, 0.5, cut)[0] == "回归"           # 基线是 0 也判得出
+    rng = random.Random(7); g = lambda: [rng.gauss(1, .03) for _ in range(10)]
+    fp = sum(any(decide(g(), g(), "lower", 0, .05, cut)[0] == "回归" for _ in range(15)) for _ in range(400)) / 400
+    assert fp <= 0.05, fp                                                             # 15 个指标、纯噪声：误拦不超过 alpha
     print("selftest ok")
 
 
@@ -411,24 +515,19 @@ def main():
     def add(name, fn, *args):
         p = sub.add_parser(name); p.set_defaults(fn=fn)
         for names, kw in args: p.add_argument(*names, **kw)
-    pairs = (["--pairs"], {"type": int}); dirty = (["--allow-dirty"], {"action": "store_true"})
-    add("init", c_init, (["dir"], {}), (["--repo"], {"required": True}), (["--start"], {"default": "HEAD"}))
+    pairs = (["--pairs"], {"type": int})
+    add("init", c_init, (["dir"], {}), (["--repo"], {"required": True}), (["--start"], {"default": "HEAD"}), (["--measure"], {"default": ""}), (["--test"], {"default": ""}), (["--build"], {"default": ""}))
     add("doctor", c_doctor, (["--snapshot"], {"action": "store_true"}))
-    add("aa", c_aa, pairs, dirty)
-    add("ab", c_ab, (["base"], {}), (["cand"], {}), (["--out"], {"required": True}), pairs, dirty)
-    add("pool", c_pool, (["base"], {"nargs": "+"}), (["--cand"], {"nargs": "+", "required": True}), (["--win"], {"type": float}),
-        (["--guard"], {"type": float}), (["--floor"], {"type": float}), (["--allow-env-diff"], {"action": "store_true"}))
-    add("check", c_check, (["files"], {"nargs": "+"}))
-    add("scope", c_scope, (["id"], {}), (["wt"], {}))
-    add("land", c_land, (["id"], {}), (["wt"], {}), (["--dry-run"], {"action": "store_true"}), (["--owner-ok"], {}))
+    add("aa", c_aa, pairs, (["--redo"], {}))
+    add("ab", c_ab, (["base"], {}), (["cand"], {}), pairs)
+    add("new", c_new, (["title"], {}), (["--target"], {"action": "append", "required": True}), (["--allow"], {"action": "append", "required": True}), (["--predict"], {"type": float}), (["--id"], {}))
+    add("land", c_land, (["id"], {}), (["wt"], {"nargs": "?"}), (["--dry-run"], {"action": "store_true"}), (["--owner-ok"], {}), (["--amend"], {}), (["--remeasure"], {}))
     add("close", c_close, (["id"], {}), (["--as"], {"dest": "status", "required": True, "choices": ["放弃", "拒绝", "改向"]}), (["--why"], {"required": True}))
     add("holdout", c_holdout, (["name"], {}), (["--why"], {"required": True}), (["cmd"], {"nargs": "+"}))
-    add("status", c_status)
+    add("next", c_next); add("status", c_status); add("check", c_check, (["files"], {"nargs": "+"}))
+    add("power", c_power, pairs, (["--noise"], {"type": float}), (["--metrics"], {"type": int}))
     add("selftest", lambda a: selftest())
-    argv = sys.argv[1:]
-    if "--" in argv and "pool" in argv[:argv.index("--")]:  # pool BASE.. -- CAND..
-        i = argv.index("--"); argv[i] = "--cand"
-    a = ap.parse_args(argv); a.fn(a)
+    a = ap.parse_args(); a.fn(a)
 
 
 if __name__ == "__main__":
