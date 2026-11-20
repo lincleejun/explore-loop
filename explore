@@ -4,7 +4,7 @@
 日常（quick，默认）：
   explore init DIR --repo REPO --measure CMD --test CMD [--build CMD]   建战役目录和基线 worktree
   explore aa                        校准：同一份代码量两边，得到每个指标的噪声。换机器、换测量命令后重做
-  explore new "标题" --target 指标 --allow 'src/x/*' [--predict 数]      建实验：编号、worktree、合同
+  explore new "想法" --target 指标 [--allow 'src/x/*'] [--predict 数]   建实验：编号、worktree、一页记录
   explore land E### [--dry-run]     闸门：范围 → 测试 → 不变量 →（strict：评审）→ 测量 → 判定 → 快进合并 → 记账
   explore close E### --as 放弃|拒绝|改向 --why 理由
   explore next                      现在卡在哪，下一条命令是什么
@@ -14,7 +14,6 @@
   explore power [--noise 3] [--metrics 15] [--pairs 10]   这套判定在你的噪声下会误拦多少、能看出多大的变化
   explore ab BASE_WT CAND_WT        只比较两个 worktree，不落地
   explore doctor [--snapshot]       查配置；--snapshot 重记 locked 路径的指纹
-  explore check FILE..              核对合同 / 提案 / 评审结尾的 json 块
   explore holdout NAME --why 理由 -- CMD   用一次留出集并记账
   explore selftest
 
@@ -31,10 +30,7 @@ import argparse, contextlib, datetime, fcntl, fnmatch, hashlib, json, math, os, 
 P = pathlib.Path
 HERE = P(__file__).resolve().parent
 LINE = re.compile(r"(?:PERF|BENCH) (.+?) (-?\d+(?:\.\d+)?(?:[eE]-?\d+)?) (s|ms)\s*$|METRIC (lower|higher|exact) (.+?) (\S+) (\S+)\s*$")
-LABELS = ("【读到】", "【查到】", "【推导】", "【预测】", "【未验证】")
-NEED = {"contract": ["id", "title", "targets", "allowed"], "proposals": ["items"], "review": ["target", "sha", "findings", "checked"]}
-ITEM = {"proposals": ["metric", "baseline", "predicted", "where", "evidence", "falsify", "kill_line", "risks"],
-        "review": ["where", "before", "after", "input", "blocking"]}
+NEED = {"contract": ["id", "title", "targets"], "review": ["target", "sha", "findings"]}   # 机器要用的字段，别的随便写
 DONE = ("接受", "放弃", "拒绝", "改向")
 
 
@@ -223,12 +219,8 @@ def block(path):
 def check(path):
     b = block(path); kind = b.get("kind")
     errs = [f"缺 {k}" for k in NEED[kind] if k not in b] if kind in NEED else [f"kind 必须是 {' / '.join(NEED)}"]
-    items = b.get("items", b.get("findings", [])) if kind in ITEM else []
-    for i, it in enumerate(items): errs += [f"第 {i + 1} 项缺 {k}" for k in ITEM[kind] if k not in it]
-    if kind == "contract" and not errs: errs += [f"{k} 不能空" for k in ("targets", "allowed") if not b[k]]
-    if kind == "proposals" and not items and not b.get("exhausted"): errs.append("没有提案时要写 exhausted（这条路到头了的证据）")
-    if kind == "review" and not b.get("checked"): errs.append("checked 不能空：没有发现也要列出查过什么")
-    if kind in ITEM and not any(l in P(path).read_text() for l in LABELS): errs.append(f"正文没有证据等级标签（{' '.join(LABELS)}）")
+    if kind == "contract" and not errs and not b["targets"]: errs.append("targets 不能空")
+    if kind == "review" and not errs: errs += [f"第 {i + 1} 条发现缺 where 或 blocking" for i, f in enumerate(b["findings"]) if "where" not in f or "blocking" not in f]
     return b, errs
 
 
@@ -357,13 +349,13 @@ def c_new(a):
     if f.exists() or wt.exists(): die(f"{eid} 已经存在")
     miss = [t for t in a.target if t not in aa["median"]]
     if miss: die(f"目标 {miss} 不在校准量到的指标里。有的是：{'，'.join(sorted(aa['median']))}")
-    k = {"kind": "contract", "id": eid, "title": a.title, "targets": a.target, "allowed": a.allow,
+    k = {"kind": "contract", "id": eid, "title": a.title, "targets": a.target, "allowed": a.allow or ["*"],
          "predict": {t: [round(aa["median"][t], 6), a.predict] for t in a.target}, "min_gain": {}}
     branch = re.sub(r"-base$", "", R.c["branch"]) + f"-{eid}"
     git(R.base, "worktree", "add", "-q", "-b", branch, str(wt), R.c["branch"])
     f.write_text((HERE / "templates" / "experiment.md").read_text().replace("<ID>", eid).replace("<TITLE>", a.title).replace("<DATE>", now()[:10])
                  .replace("<SHA>", git(R.base, "rev-parse", "--short", "HEAD")).replace("<JSON>", json.dumps(k, ensure_ascii=False, indent=1)))
-    print(f"{eid}：合同 {f}\n      worktree {wt}（分支 {branch}）\n写完假设和不变量后，在 worktree 里实现、提交，然后 explore land {eid} --dry-run")
+    print(f"{eid}：合同 {f}\n      worktree {wt}（分支 {branch}）\n在 worktree 里实现、提交，然后 explore land {eid}")
 
 
 def c_land(a):
@@ -386,7 +378,7 @@ def c_land(a):
         step("候选是干净的提交", [clean(wt)] if clean(wt) else [])
         step("候选包含当前基线", [] if git(wt, "merge-base", "HEAD", tip) == tip else [f"基线已经走到 {tip[:8]}：先把战役分支合进候选，否则基线后来的改进会算成候选的回归"])
         changed = git(wt, "diff", "--name-only", f"{tip}...HEAD").splitlines()
-        step("改动在合同范围内", [f for f in changed if not any(fnmatch.fnmatch(f, g) for g in k["allowed"])] or ([] if changed else ["候选和基线没有差别"]))
+        step("改动在合同范围内", [f for f in changed if not any(fnmatch.fnmatch(f, g) for g in k.get("allowed", ["*"]))] or ([] if changed else ["候选和基线没有差别"]))
         step("locked 路径没变", locked_changes(R))
         logs = R.dir / "measure" / f"{eid}-land"
         step("测试", [f"退出码非 0，见 {logs / 'test.log'}"] if sh(R.cmd("test"), wt, logs / "test.log")[0] else [])
@@ -397,7 +389,7 @@ def c_land(a):
             if rf.exists() and (rv.get("kind") != "review" or rv.get("target") != eid): errs.append(f"要的是 kind=review、target={eid} 的块")
             if not errs:   # 评审的提交和候选的代码树相同才算数（只改提交说明不用重审）
                 same = git(wt, "rev-parse", f"{rv['sha']}^{{tree}}", ok=True) == git(wt, "rev-parse", "HEAD^{tree}")
-                errs = ([] if same else [f"评审的是 {rv['sha'][:8]}，候选现在是 {sha[:8]}，代码不一样：重新评审"]) + [f"挡合并：{f['where']}（{f['input']}）" for f in rv["findings"] if f["blocking"]]
+                errs = ([] if same else [f"评审的是 {rv['sha'][:8]}，候选现在是 {sha[:8]}，代码不一样：重新评审"]) + [f"挡合并：{f['where']}" for f in rv["findings"] if f["blocking"]]
             if a.dry_run and errs: print("跳过  评审（--dry-run）：" + errs[0])
             else: step("评审：针对这份代码，没有挡合并的发现", errs)
         out, data = measure(R, R.base, wt, eid, redo=a.remeasure or "")
@@ -443,7 +435,7 @@ def c_next(a):
         elif R.strict and not (R.dir / "experiments" / f"{eid}.review.md").exists(): msg = f"explore land {eid} --dry-run，然后请评审写 experiments/{eid}.review.md"
         else: msg = f"explore land {eid}"
         print(f"{eid}：{msg}")
-    if not todo: print('没有进行中的实验。开一个：explore new "标题" --target <指标> --allow <文件通配>')
+    if not todo: print('没有进行中的实验。开一个：explore new "想法" --target <指标>')
     dirty = git(R.dir, "status", "--porcelain", ok=True)
     if dirty: print(f"战役目录有 {len(dirty.splitlines())} 个没提交的文件：git -C {R.dir} add -A && git -C {R.dir} commit -m …")
 
@@ -479,14 +471,6 @@ def c_power(a):
     print("看不出想要的变化：加 pairs，或降低测量噪声（清场、预热、加大工作负载）。")
 
 
-def c_check(a):
-    bad = 0
-    for f in a.files:
-        b, errs = check(f); bad += bool(errs)
-        print(f"{'FAIL' if errs else 'ok  '}  {f}（{b.get('kind')}）" + "".join(f"\n      {e}" for e in errs))
-    sys.exit(1 if bad else 0)
-
-
 def selftest():
     got = parse("x\n2026 PERF open library 12.5 ms\nMETRIC higher top1 A 954 张\nMETRIC exact hash 9007199254740993 -\nPERF n 9 species 3\n")
     assert got["open library"]["v"] == 0.0125 and got["top1 A"]["way"] == "higher" and got["hash"]["raw"] == "9007199254740993", got
@@ -520,11 +504,11 @@ def main():
     add("doctor", c_doctor, (["--snapshot"], {"action": "store_true"}))
     add("aa", c_aa, pairs, (["--redo"], {}))
     add("ab", c_ab, (["base"], {}), (["cand"], {}), pairs)
-    add("new", c_new, (["title"], {}), (["--target"], {"action": "append", "required": True}), (["--allow"], {"action": "append", "required": True}), (["--predict"], {"type": float}), (["--id"], {}))
+    add("new", c_new, (["title"], {}), (["--target"], {"action": "append", "required": True}), (["--allow"], {"action": "append"}), (["--predict"], {"type": float}), (["--id"], {}))
     add("land", c_land, (["id"], {}), (["wt"], {"nargs": "?"}), (["--dry-run"], {"action": "store_true"}), (["--owner-ok"], {}), (["--amend"], {}), (["--remeasure"], {}))
     add("close", c_close, (["id"], {}), (["--as"], {"dest": "status", "required": True, "choices": ["放弃", "拒绝", "改向"]}), (["--why"], {"required": True}))
     add("holdout", c_holdout, (["name"], {}), (["--why"], {"required": True}), (["cmd"], {"nargs": "+"}))
-    add("next", c_next); add("status", c_status); add("check", c_check, (["files"], {"nargs": "+"}))
+    add("next", c_next); add("status", c_status);
     add("power", c_power, pairs, (["--noise"], {"type": float}), (["--metrics"], {"type": int}))
     add("selftest", lambda a: selftest())
     a = ap.parse_args(); a.fn(a)

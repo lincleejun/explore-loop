@@ -33,7 +33,7 @@ cand() { # cand <速度> [多改的文件] -> 开一个实验并提交改动，�
   E=$(sed -n 's/^\(E[0-9]*\)：.*/\1/p' "$T/new"); W=$R-$E; echo "$1" > "$W/speed.txt"; echo "$E" >> "$W/note.txt"
   [ -n "${2:-}" ] && echo y > "$W/$2"; git -C "$W" commit -qam "$E"; }
 review() { # review <实验> [发现] -> 写评审文件
-  printf '【读到】diff\n```json\n{"kind":"review","target":"%s","sha":"%s","findings":[%s],"checked":["排序"]}\n```\n' "$1" "$(git -C "$R-$1" rev-parse HEAD)" "${2:-}" > "$R/experiments/$1.review.md"; }
+  printf 'diff 看过了\n```json\n{"kind":"review","target":"%s","sha":"%s","findings":[%s]}\n```\n' "$1" "$(git -C "$R-$1" rev-parse HEAD)" "${2:-}" > "$R/experiments/$1.review.md"; }
 
 cand 0.5
 expect 0 "next：指出下一条命令" "$X" next; says "explore land $E"
@@ -59,7 +59,7 @@ sed -i '' 's/^strict = false/strict = true /' "$R/explore.toml"   # strict：落
 cand 0.04
 expect 1 "strict：没有评审 → 拦" "$X" land $E
 expect 0 "strict：dry-run 跳过评审，其余照走" "$X" land $E --dry-run
-review $E '{"where":"a:1","before":"x","after":"y","input":"空输入","blocking":true}'
+review $E '{"where":"a:1 空输入时旧代码返回空，新代码崩","blocking":true}'
 expect 1 "strict：评审有挡合并的发现 → 拦" "$X" land $E
 cp "$R/experiments/$E.md" "$R/experiments/$E.review.md"
 expect 1 "strict：评审文件里放的是合同块 → 拦" "$X" land $E
@@ -82,5 +82,4 @@ expect 0 "holdout：第一次" "$X" holdout G --why 终验 -- sh -c 'test -f "$E
 expect 0 "holdout：第二次有警告" "$X" holdout G --why 再看一眼 -- true; says "已经用过"
 expect 0 "status：三条接受、一条破例、一条放弃、一条拒绝" sh -c "'$X' status > '$T/s'; [ \$(grep -c '| 接受' '$T/s') = 4 ] && grep -q 破例 '$T/s' && grep -q 放弃 '$T/s' && grep -q 拒绝 '$T/s'"
 expect 0 "power：给出误拦率和检出率" "$X" power --noise 3 --metrics 15 --pairs 10; says "被护栏误拦的概率"
-expect 0 "check：缺字段的提案被退回" sh -c "printf '\`\`\`json\n{\"kind\":\"proposals\",\"items\":[{\"metric\":\"job\"}]}\n\`\`\`\n' > '$T/p.md'; ! '$X' check '$T/p.md'"
 [ $fail -eq 0 ] && echo "test ok" || { echo "test FAILED"; exit 1; }
