@@ -6,6 +6,7 @@ branch = "<BRANCH>"             # 战役分支：落地的补丁快进到这里
 base_worktree = "<BASE>"        # 检出战役分支的 worktree = 当前基线
 strict = false                  # true = 落地前要一份针对这份代码的评审（experiments/E###.review.md）
 locked = []                     # 战役期间不许变的路径（模型权重、评测集）。explore doctor --snapshot 记指纹
+harness = []                    # 测量工具的文件（通配）。候选不许改它们；它们变了要重新校准。例：["bench/*", "measure.sh"]
 
 [commands]                      # 都在被测的 worktree 里执行
 build = "<BUILD>"               # 测量前两边各构建一次。不用构建就留空

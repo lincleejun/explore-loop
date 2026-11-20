@@ -15,11 +15,14 @@ echo 1.0 > speed.txt; echo x > other.txt; echo n > note.txt; echo out.bin > .git
 echo 'echo "PERF job $(cat out.bin) s"; echo "METRIC exact answer 42 -"' > measure.sh; git add -A; git commit -qm start
 R=$T/camp; B=$T/camp-base; export EXPLORE_RUN=$R   # 战役目录 = 独立分支的 worktree；基线和候选的 worktree 在它旁边
 expect 0 "init：一条命令建好战役分支、基线 worktree、配置" "$X" init "$R" --repo "$T/repo" --build "cp speed.txt out.bin" --measure "sh measure.sh" --test "test -f speed.txt"
+expect 1 "init：仓库不存在 → 失败，不留下目录" "$X" init "$T/bad" --repo "$T/nonexistent" --measure x --test y; [ -e "$T/bad" ] && { echo "FAIL  留下了目录"; fail=1; }
+expect 0 "init：多行命令也能写进配置" sh -c "'$X' init '$T/ml' --repo '$T/repo' --measure 'echo a
+echo PERF job 1 s' --test true && python3 -c \"import tomllib,sys; tomllib.loads(open('$T/ml/explore.toml').read())\""
 expect 0 "init 之后主检出是干净的" test -z "$(git -C "$T/repo" status --porcelain)"
 mkdir "$T/data"; echo secret > "$T/data/g.csv"
 python3 - "$R/explore.toml" "$T" <<'PY'
 import sys; f, T = sys.argv[1:]; s = open(f).read()
-s = s.replace('locked = []', f'locked = ["{T}/data"]').replace('busy = ""', f'busy = "cat {T}/busy 2>/dev/null"').replace('pairs = 10', 'pairs = 6')
+s = s.replace('locked = []', f'locked = ["{T}/data"]').replace('harness = []', 'harness = ["measure.sh"]').replace('busy = ""', f'busy = "cat {T}/busy 2>/dev/null"').replace('pairs = 10', 'pairs = 6')
 s += f'\n[[invariants]]\nname = "other.txt 没变"\ncmd = "cmp other.txt $EXPLORE_BASE/other.txt"\n[[datasets]]\nname = "G"\npath = "{T}/data/g.csv"\nrole = "final"\nstrata = "全球"\nleak = "无"\n'
 open(f, "w").write(s)
 PY
@@ -51,8 +54,7 @@ expect 0 "--owner-ok：记为破例后落地，不重量" "$X" land $E --owner-o
 cand 0.1; "$X" land $E --dry-run > /dev/null 2>&1; sed -i '' 's/"speed.txt"/"*"/' "$R/experiments/$E.md"
 expect 1 "过闸门后改合同 → 拦" "$X" land $E
 expect 0 "--amend：留痕后放行" "$X" land $E --amend "范围写窄了"
-cand 0.05; echo 'echo "PERF job $(cat out.bin) s"' > "$W/measure.sh"; git -C "$W" commit -qam drop; sed -i '' 's/"note.txt"/"note.txt","measure.sh"/' "$R/experiments/$E.md"
-expect 1 "候选让一个指标消失 → 不判" "$X" land $E
+cand 0.05; echo 'echo "PERF job $(cat out.bin) s"' > "$W/measure.sh"; git -C "$W" commit -qam drop; expect 1 "候选改了测量工具 → 拦" "$X" land $E
 "$X" close $E --as 拒绝 --why 少了指标 > /dev/null
 
 sed -i '' 's/^strict = false/strict = true /' "$R/explore.toml"   # strict：落地要评审
@@ -78,6 +80,9 @@ rm "$W/untracked.txt"; sed -i '' 's/measure = "sh measure.sh"/measure = "sh  mea
 expect 1 "测量命令变了 → 旧校准不算数" "$X" land $E
 git -C "$T/repo" worktree add -q "$T/slow" -b slow explore/camp-base; echo 9 > "$T/slow/speed.txt"; git -C "$T/slow" commit -qam slow
 expect 1 "ab：候选变慢 → 回归，退出码 1" "$X" ab "$B" "$T/slow"
+echo 'echo "PERF job 1 s"' > "$B/measure.sh"; git -C "$B" commit -qam "harness: drop a metric"
+expect 0 "next：测量工具变了 → 叫你重新校准" "$X" next; says "explore aa"
+git -C "$B" reset -q --hard HEAD~1
 expect 0 "holdout：第一次" "$X" holdout G --why 终验 -- sh -c 'test -f "$EXPLORE_DATA"'
 expect 0 "holdout：第二次有警告" "$X" holdout G --why 再看一眼 -- true; says "已经用过"
 expect 0 "status：三条接受、一条破例、一条放弃、一条拒绝" sh -c "'$X' status > '$T/s'; [ \$(grep -c '| 接受' '$T/s') = 4 ] && grep -q 破例 '$T/s' && grep -q 放弃 '$T/s' && grep -q 拒绝 '$T/s'"
