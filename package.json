@@ -2,9 +2,30 @@
   "name": "explore-loop",
   "version": "0.1.0",
   "description": "Verify improvement ideas by measurement: paired A/B, a landing gate, and a ledger",
-  "keywords": ["pi-package", "agent-skill", "benchmark"],
-  "repository": "github:lincleejun/explore-loop",
-  "bin": { "explore": "./explore" },
-  "files": ["explore", "SKILL.md", "templates", "README.md"],
-  "pi": { "skills": ["./SKILL.md"] }
+  "keywords": [
+    "pi-package",
+    "agent-skill",
+    "benchmark"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lincleejun/explore-loop.git"
+  },
+  "bin": {
+    "explore": "./explore"
+  },
+  "files": [
+    "explore",
+    "SKILL.md",
+    "templates",
+    "README.md",
+    "LICENSE",
+    "codex.sh"
+  ],
+  "pi": {
+    "skills": [
+      "./SKILL.md"
+    ]
+  },
+  "license": "MIT"
 }

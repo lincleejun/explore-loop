@@ -26,9 +26,9 @@ explore land E001                           # 验证；过了合进基线，没�
 
 ## 安装
 
-- **命令行**：克隆，把 `explore` 放进 `PATH`（或直接用路径调用）。
+- **命令行**：`npm install -g explore-loop`（需要系统里有 Python 3.11+），或克隆后把 `explore` 放进 `PATH`。
 - **Claude Code skill**：`git clone https://github.com/lincleejun/explore-loop ~/.claude/skills/explore-loop`。更新就 `git pull`。
-- **pi**：`pi install git:github.com/lincleejun/explore-loop`（仓库本身是一个 pi package，`package.json` 里声明了这个 skill）。之后 `/skill:explore-loop`，或让模型自己按描述加载。
+- **pi**：`pi install git:github.com/lincleejun/explore-loop`，或 `pi install npm:explore-loop`（仓库本身是一个 pi package，`package.json` 里声明了这个 skill）。之后 `/skill:explore-loop`，或让模型自己按描述加载。
 - **任何代理（Codex、pi、Cursor…）**：把 `explore` 链进 `PATH`（`ln -s $PWD/explore ~/.local/bin/explore`），再往项目的 `AGENTS.md` 里加两行：
 
   ```
@@ -47,3 +47,5 @@ explore land E001                           # 验证；过了合进基线，没�
 不要用管道接它们，管道会吞掉退出码。
 
 思路来自 TabbyML 的 *Beating ClickBench SOTA with a team of agentic systems engineers*；判定规则参考了 benchstat、criterion.rs 和 asv。
+
+MIT License.
