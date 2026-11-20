@@ -218,22 +218,22 @@ def ab(R, base, cand, out, pairs=None, allow_dirty=False):
     stamp = {"time": now(), "by": os.environ.get("EXPLORE_ROLE", ""), "command": R.cmd("measure"), "loads": []}
     for k, wt in sides.items():
         dirty = git(wt, "status", "--porcelain")
-        if dirty and not allow_dirty: die(f"{wt} 有未提交的改动：量到的东西对不上任何提交。先提交，或 --allow-dirty")
+        if dirty and not allow_dirty: die(f"{wt} 有未提交或未跟踪的文件：量到的东西对不上任何提交。提交它们；构建和测试的产物加进 .gitignore\n{dirty[:400]}")
         stamp[k] = {"wt": str(wt), "sha": git(wt, "rev-parse", "HEAD"), "dirty": bool(dirty)}
     if not R.cmd("measure"): die("explore.toml 缺 commands.measure")
     lock = P.home() / ".cache/explore-loop/measure.lock"; lock.parent.mkdir(parents=True, exist_ok=True)
     with open(lock, "w") as lk:
         print("等测量锁（一台机器同时只量一个）…", file=sys.stderr); fcntl.flock(lk, fcntl.LOCK_EX)
-        if R.cmd("busy"):
-            rc, text = sh(R.cmd("busy"), R.dir)
-            if text.strip(): die(f"机器上有别的负载，不量：\n{text.strip()}", 2)
-        stamp["env"] = R.envprint()
+        def quiet():
+            text = sh(R.cmd("busy"), R.dir)[1].strip() if R.cmd("busy") else ""
+            if text: die(f"机器上有别的负载，这次测量作废（已有的几遍不算数）：\n{text}", 2)
+        quiet(); stamp["env"] = R.envprint()
         for wt, k in ({str(w): n for n, w in reversed(sides.items())}.items() if R.cmd("build") else []):  # 同一个目录只构建一次
             rc, text = sh(R.cmd("build"), wt, out / k / "build.log")
             if rc: die(f"构建失败（{wt}，退出码 {rc}），见 {out / k / 'build.log'}")
         for i in range(1, (pairs or R.rule["pairs"]) + 1):
             for k in (("base", "cand") if i % 2 else ("cand", "base")):  # 轮流谁先，抵消漂移
-                la = os.getloadavg()[0]; stamp["loads"].append(round(la, 1))
+                quiet(); la = os.getloadavg()[0]; stamp["loads"].append(round(la, 1))
                 if R.rule["max_load"] and la > R.rule["max_load"]: die(f"负载 {la:.0f} 超过 max_load {R.rule['max_load']}，这次测量作废", 2)
                 rc, text = sh(R.cmd("measure"), sides[k], out / k / f"run-{i}.log", {"EXPLORE_RUN": str(R.dir)})
                 if rc: die(f"第 {i} 对 {k} 退出码 {rc}，见 {out / k / f'run-{i}.log'}")
@@ -251,11 +251,18 @@ def env_of(d):
 # ---------- 子命令 ----------
 
 def c_init(a):
-    d = P(a.dir)
-    if (d / "explore.toml").exists(): die(f"{d} 已经是战役目录")
-    for sub in ("experiments", "rounds", "measure"): (d / sub).mkdir(parents=True, exist_ok=True)
+    """战役目录是目标仓库里一条独立分支（没有产品代码）的 worktree：被 git 跟踪，又不在主检出和任何被测的 worktree 里。"""
+    d = P(a.dir).resolve(); repo = P(a.repo).resolve(); name = d.name; base = d.parent / f"{name}-base"
+    if d.exists() or base.exists(): die(f"{d} 或 {base} 已经存在")
+    git(repo, "worktree", "add", "-q", "--orphan", "-b", f"explore/{name}-log", str(d))
+    git(repo, "worktree", "add", "-q", "-b", f"explore/{name}-base", str(base), a.start)
+    for sub in ("experiments", "rounds", "measure"): (d / sub).mkdir(); (d / sub / ".gitkeep").touch()
     for f in ("explore.toml", "profile.md", "ledger.md", "team.md"): shutil.copy(HERE / "templates" / f, d / f)
-    print(f"建好 {d}。下一步：填 explore.toml 和 profile.md → explore doctor --snapshot → explore aa")
+    t = (d / "explore.toml").read_text().replace("<REPO>", str(repo)).replace("<BRANCH>", f"explore/{name}-base").replace("<BASE>", str(base))
+    (d / "explore.toml").write_text(t)
+    git(d, "add", "-A"); git(d, "commit", "-q", "-m", f"explore: start campaign {name}")
+    print(f"战役目录 {d}（分支 explore/{name}-log）\n基线 worktree {base}（分支 explore/{name}-base，起点 {a.start}）\n"
+          "下一步：填 explore.toml 和 profile.md → explore doctor --snapshot → explore aa。战役目录里的改动随时提交")
 
 
 def c_doctor(a):
@@ -271,7 +278,8 @@ def c_doctor(a):
     for d in R.c.get("datasets", []):
         ok(d.get("role") in ("train", "select", "accept", "final"), f"数据集 {d.get('name')} 的 role 是 train / select / accept / final 之一")
         p = (R.dir / d.get("path", "")).resolve()
-        if d.get("role") == "final": ok(not any(str(p).startswith(str(x)) for x in (repo, base)), f"留出集 {d['name']} 不在仓库和基线 worktree 里（{p}）")
+        ok(bool(d.get("strata")) and bool(d.get("leak")), f"数据集 {d.get('name')} 写了 strata（分布、来源、调过什么）和 leak（与训练或先验数据同源吗）")
+        if d.get("role") == "final": ok(not any(p.is_relative_to(x) for x in (repo, base)), f"留出集 {d['name']} 不在仓库和基线 worktree 里（{p}）")
     if a.snapshot:
         (R.dir / "locked.json").write_text(json.dumps({p: fingerprint((R.dir / p).resolve()) for p in R.c.get("locked", [])}))
         print(f"ok    记下 {len(R.c.get('locked', []))} 个 locked 路径的指纹")
@@ -334,12 +342,13 @@ def c_land(a):
         rc, _ = sh(inv["cmd"], wt, R.dir / "measure" / f"{eid}-land" / f"invariant-{i + 1}.log", {"EXPLORE_BASE": str(base)})
         step(f"不变量：{inv['name']}", [] if not rc else [f"退出码 {rc}，见 measure/{eid}-land/invariant-{i + 1}.log"])
     rf = R.dir / "experiments" / f"{eid}.review.md"
-    if not rf.exists(): step("第三方评审", [f"没有 {rf.name}"])
-    rv, errs = check(rf)
-    if rv.get("kind") == "review" and not errs:
+    rv, errs = check(rf) if rf.exists() else ({}, [f"没有 {rf.name}"])
+    if rf.exists() and (rv.get("kind") != "review" or rv.get("target") != eid): errs.append(f"要的是 kind=review、target={eid} 的块")
+    if not errs:
         errs = ([f"评审的是 {rv['sha'][:8]}，候选现在是 {sha[:8]}：改过就要重新评审"] if not sha.startswith(rv["sha"]) or len(rv["sha"]) < 7 else []) + \
                [f"挡合并：{f['where']}（{f['input']}）" for f in rv["findings"] if f["blocking"]]
-    step("第三方评审：针对这个提交，没有挡合并的发现", errs)
+    if a.dry_run and errs: print("跳过  第三方评审（--dry-run）：" + errs[0])
+    else: step("第三方评审：针对这个提交，没有挡合并的发现", errs)
     out = R.dir / "measure" / f"{eid}-land" / f"{sha[:8]}-{datetime.datetime.now():%m%d%H%M%S}-{os.getpid()}"
     rows, _ = ab(R, base, wt, out)
     by = {r["metric"]: r for r in rows}
@@ -403,7 +412,7 @@ def main():
         p = sub.add_parser(name); p.set_defaults(fn=fn)
         for names, kw in args: p.add_argument(*names, **kw)
     pairs = (["--pairs"], {"type": int}); dirty = (["--allow-dirty"], {"action": "store_true"})
-    add("init", c_init, (["dir"], {}))
+    add("init", c_init, (["dir"], {}), (["--repo"], {"required": True}), (["--start"], {"default": "HEAD"}))
     add("doctor", c_doctor, (["--snapshot"], {"action": "store_true"}))
     add("aa", c_aa, pairs, dirty)
     add("ab", c_ab, (["base"], {}), (["cand"], {}), (["--out"], {"required": True}), pairs, dirty)

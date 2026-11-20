@@ -1,11 +1,12 @@
 # 战役的机器可读部分。explore 的每条强制检查都从这里读；这里没写的约束只是文字，没人拦。
-# 路径相对这个文件所在的目录，也可以写绝对路径。
+# 路径相对这个文件所在的目录，也可以写绝对路径。前三项由 explore init 填好。
+# 构建和测试会留下文件的话，把它们加进目标仓库的 .gitignore：worktree 里有未跟踪的文件，explore 不量。
 
-repo = "../.."                       # 所有者在用的主检出。验证员不许写它
-branch = "explore/base"              # 战役分支：被接受的补丁快进到这里。不是所有者在用的分支
-base_worktree = "../../../myproj-base"   # 检出战役分支的 worktree = 当前基线
+repo = "<REPO>"                     # 所有者在用的主检出。验证员不许写它
+branch = "<BRANCH>"            # 战役分支：被接受的补丁快进到这里。不是所有者在用的分支
+base_worktree = "<BASE>"  # 检出战役分支的 worktree = 当前基线
 
-# 战役期间不许变的路径（主检出、模型权重、评测集）。explore doctor --snapshot 记指纹，land 时核对
+# 战役期间不许变的路径（模型权重、评测集、所有者没在动的主检出）。explore doctor --snapshot 记指纹，land 时核对
 locked = []
 
 [commands]                           # 都在被测的 worktree 里执行（cwd = worktree）

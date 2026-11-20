@@ -21,12 +21,24 @@ description: Run a measured improvement campaign on any project (speed, accuracy
 
 ## 开一场战役
 
-战役目录放在目标项目的仓库里并提交（例如 `<仓库>/explore/<名称>/`），这样合同、账本、证据都跟着项目走。
+```sh
+explore init ~/wt/<名称> --repo <目标仓库> [--start <起点提交>]
+```
 
-1. `explore init <仓库>/explore/<名称>`，然后填 `explore.toml`（命令、不变量、锁定路径、数据集）和 `profile.md`（目标、重点、约束表）。
+它在目标仓库里建两条分支、两个 worktree，主检出一个字节都不动：
+
+| 目录 | 分支 | 放什么 |
+|---|---|---|
+| `~/wt/<名称>/`（战役目录） | `explore/<名称>-log`，没有产品代码 | `explore.toml`、档案、合同、评审、账本、测量日志。**随时提交** |
+| `~/wt/<名称>-base/`（基线） | `explore/<名称>-base`，从起点分出 | 落地的补丁快进到这里 |
+
+战役目录不能放在主检出或任何被测的 worktree 里：账本一写，那里就有了未提交的文件，`explore` 不量有未提交文件的目录。
+候选的 worktree 由负责人建：`git -C <目标仓库> worktree add ~/wt/<名称>-E007 -b explore/<名称>-E007 explore/<名称>-base`。
+
+1. 填 `explore.toml`（命令、不变量、锁定路径、数据集）和 `profile.md`（目标、重点、约束表）。
    目标和重点问所有者，不要自己从"现成能量的东西"里挑。
-2. 建战役分支和基线 worktree（`git worktree add <路径> -b explore/base <起点>`）。
-3. `explore doctor --snapshot`，再 `explore aa`。**A/A 不过就先修测量**：加遍数、设 `floor`、清掉机器上的别的负载。
+2. 构建和测试会留下文件的话，先让目标仓库的 `.gitignore` 忽略它们（这是对产品代码的改动，走一个实验或请所有者加）。
+3. `explore --run ~/wt/<名称> doctor --snapshot`，再 `explore aa`。**A/A 不过就先修测量**：加遍数、设 `floor`、清掉机器上的别的负载。
    `doctor` 把每条约束标成 `ok` 或 `仅文字`：仅文字的那些没人拦，告诉所有者。
 4. 照 `workflow.md` 一轮一轮跑，每个角色的说明照抄 `roles.md`。
 
@@ -34,7 +46,7 @@ description: Run a measured improvement campaign on any project (speed, accuracy
 
 ```sh
 explore check experiments/E007.md rounds/R02/proposals-*.md   # 合同、提案、评审结尾的 json 块合不合格
-explore land E007 <候选 worktree> --dry-run                  # 验证员交回前自己先过一遍
+explore land E007 <候选 worktree> --dry-run                  # 验证员交回前自己先过一遍（没有评审时跳过评审那一步）
 explore land E007 <候选 worktree>                            # 全过才快进合并，并写账本
 ```
 
@@ -45,7 +57,15 @@ explore land E007 <候选 worktree>                            # 全过才快进
 
 ## 工具管不了的（照做，并写进报告）
 
+闸门防的是疏忽，不防作弊：
+
+- **评审是谁写的，工具不知道。** 它只核对评审文件针对的是这个实验、这个提交，且没有挡合并的发现。"另一个模型、全新上下文"靠负责人照 `team.md` 派。
+- **`--owner-ok` 的原话和 `doctor --snapshot` 负责人自己也能敲。** 两者都留痕（账本里的"破例"、战役分支的提交历史），所有者验收时看这两处。
+- **只支持"一个仓库、候选是它的 worktree"。** 候选是另一个仓库的产物（例如一个权重目录）或跨两个仓库时表达不了：
+  要么把产物的生成脚本和被测代码放进同一个仓库，要么这类实验不走 `land`，在报告里写明是手工验收。
+
 - **留出集挡不住读取。** 没有沙箱时只能做到：放在仓库之外、只经 `explore holdout` 访问、每次记账并在重复使用时警告。
+  它的路径就写在 `explore.toml` 里，每个子代理都读得到。要真隔离，用另一个系统用户或沙箱跑子代理。
 - **只读靠事后发现。** `locked` 是落地时核对指纹，不是事前拦截。要事前拦，用文件权限或目标仓库自己的钩子。
 - **筛选环境不是产品。** 模拟器、小图、开发机上的结论，落地前在档案写的验收环境里再量一次；量不了就在报告里写明。
 - **性能不交给 CI 判。** CI 只跑测试。
