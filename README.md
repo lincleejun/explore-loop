@@ -27,7 +27,8 @@ explore land E001                           # 验证；过了合进基线，没�
 ## 安装
 
 - **命令行**：克隆，把 `explore` 放进 `PATH`（或直接用路径调用）。
-- **Claude Code skill**：`git clone <本仓库> ~/.claude/skills/explore-loop`。更新就 `git pull`。
+- **Claude Code skill**：`git clone https://github.com/lincleejun/explore-loop ~/.claude/skills/explore-loop`。更新就 `git pull`。
+- **pi**：`pi install git:github.com/lincleejun/explore-loop`（仓库本身是一个 pi package，`package.json` 里声明了这个 skill）。之后 `/skill:explore-loop`，或让模型自己按描述加载。
 - **任何代理（Codex、pi、Cursor…）**：把 `explore` 链进 `PATH`（`ln -s $PWD/explore ~/.local/bin/explore`），再往项目的 `AGENTS.md` 里加两行：
 
   ```
