@@ -214,7 +214,7 @@ def scope(R, eid, wt):
 
 def ab(R, base, cand, out, pairs=None, allow_dirty=False):
     out = P(out).resolve(); sides = {"base": P(base).resolve(), "cand": P(cand).resolve()}
-    if (out / "stamp.json").exists(): die(f"{out} 已经有一次测量：换个目录，不覆盖证据")
+    if out.exists() and any(out.iterdir()): die(f"{out} 已经有东西：换个目录，不覆盖证据")
     stamp = {"time": now(), "by": os.environ.get("EXPLORE_ROLE", ""), "command": R.cmd("measure"), "loads": []}
     for k, wt in sides.items():
         dirty = git(wt, "status", "--porcelain")
@@ -283,7 +283,7 @@ def c_doctor(a):
 
 def c_aa(a):
     R = Run(a.run); base = R.path("base_worktree")
-    out = R.dir / "measure" / f"AA-{git(base, 'rev-parse', '--short', 'HEAD')}-{datetime.datetime.now():%m%d%H%M%S}"
+    out = R.dir / "measure" / f"AA-{git(base, 'rev-parse', '--short', 'HEAD')}-{datetime.datetime.now():%m%d%H%M%S}-{os.getpid()}"
     rows, stamp = ab(R, base, base, out, a.pairs, a.allow_dirty)
     noisy = [r["metric"] for r in rows if r["verdict"] not in ("噪声内", "相同")]
     if noisy: die(f"同一份代码量出了差别：{'，'.join(noisy)}。先修测量（加遍数、设 floor、清场），再开实验")
@@ -340,7 +340,7 @@ def c_land(a):
         errs = ([f"评审的是 {rv['sha'][:8]}，候选现在是 {sha[:8]}：改过就要重新评审"] if not sha.startswith(rv["sha"]) or len(rv["sha"]) < 7 else []) + \
                [f"挡合并：{f['where']}（{f['input']}）" for f in rv["findings"] if f["blocking"]]
     step("第三方评审：针对这个提交，没有挡合并的发现", errs)
-    out = R.dir / "measure" / f"{eid}-land" / f"{sha[:8]}-{datetime.datetime.now():%m%d%H%M%S}"
+    out = R.dir / "measure" / f"{eid}-land" / f"{sha[:8]}-{datetime.datetime.now():%m%d%H%M%S}-{os.getpid()}"
     rows, _ = ab(R, base, wt, out)
     by = {r["metric"]: r for r in rows}
     miss = [f"目标 {t}：{by.get(t, {}).get('verdict', '没量到')}" for t in k["targets"] if by.get(t, {}).get("verdict") != "变好"] + [f"{m}：{by[m]['verdict']}" for m in bad(rows)]
