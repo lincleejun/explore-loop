@@ -1,0 +1,37 @@
+# 战役的机器可读部分。explore 的每条强制检查都从这里读；这里没写的约束只是文字，没人拦。
+# 路径相对这个文件所在的目录，也可以写绝对路径。
+
+repo = "../.."                       # 所有者在用的主检出。验证员不许写它
+branch = "explore/base"              # 战役分支：被接受的补丁快进到这里。不是所有者在用的分支
+base_worktree = "../../../myproj-base"   # 检出战役分支的 worktree = 当前基线
+
+# 战役期间不许变的路径（主检出、模型权重、评测集）。explore doctor --snapshot 记指纹，land 时核对
+locked = []
+
+[commands]                           # 都在被测的 worktree 里执行（cwd = worktree）
+build = ""                           # 测量前两边各构建一次，退出码必须 0。不用构建就留空
+measure = ""                         # 跑一遍，打印指标行（PERF … s|ms 或 METRIC lower|higher|exact …）
+test = ""                            # 增量测试。退出码 0 = 过。注意把"跳过了几个"也当失败处理
+env = ""                             # 打印环境指纹：编译配置、设备、依赖版本、精度。两次测量指纹不同就不许比
+busy = ""                            # 有输出 = 机器上有别的负载，不量。例：pgrep -fl 'xcodebuild|pytest|bench'
+
+[rules]
+pairs = 4                            # 基线-候选交替几对
+win = 85                             # 候选更好的两两比较占比 ≥ 85% 才算变好
+guard = 5                            # 变差且中位数差超过 5% = 回归
+floor = 0                            # 中位数之差小于这个数（指标自己的单位）不判。耗时类建议 0.001（1 毫秒）
+max_load = 0                         # 1 分钟负载超过它，这次测量作废。0 = 不查
+
+# 不变量：每个候选落地前必跑，退出码 0 = 守住了。环境变量 EXPLORE_BASE = 基线 worktree
+# [[invariants]]
+# name = "开关默认关时输出逐位相同"
+# cmd = "scripts/same_output.sh $EXPLORE_BASE ."
+
+# 数据集登记。role：train 训练 / select 调参和选型 / accept 验收 / final 留出终验。四种不混用
+# final 的 path 必须在仓库和 worktree 之外；只通过 explore holdout 访问，每次记账
+# [[datasets]]
+# name = "A"
+# path = "/data/eval/a.csv"
+# role = "select"
+# strata = "北美；定过阈值"            # 分布和来源：报告里引用它的数字时一起写出来
+# leak = "与先验数据同源：评测前扣掉每张照片自己的记录"   # 和训练 / 先验数据同源吗？怎么防
