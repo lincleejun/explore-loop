@@ -15,7 +15,10 @@
   explore ab BASE_WT CAND_WT        只比较两个 worktree，不落地
   explore doctor [--snapshot]       查配置；--snapshot 重记 locked 路径的指纹
   explore holdout NAME --why 理由 -- CMD   用一次留出集并记账
+  explore guide                     给代理读的完整说明（就是 SKILL.md 的正文）。任何代理第一次用先跑它
   explore selftest
+
+退出码：0 = 成了；1 = 被拦下或有回归（原因在输出里，也在账本里）；2 = 这次测量作废（机器忙），稍后重试。
 
 战役目录：--run DIR，或环境变量 EXPLORE_RUN，或当前目录。
 指标行（测量命令打印）：  PERF <名称> <数字> <s|ms>            耗时，越小越好
@@ -526,6 +529,7 @@ def main():
     add("next", c_next); add("status", c_status);
     add("power", c_power, pairs, (["--noise"], {"type": float}), (["--metrics"], {"type": int}))
     add("selftest", lambda a: selftest())
+    add("guide", lambda a: print((HERE / "SKILL.md").read_text().split("---", 2)[2].strip()))
     a = ap.parse_args(); a.fn(a)
 
 

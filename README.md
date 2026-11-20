@@ -28,7 +28,14 @@ explore land E001                           # 验证；过了合进基线，没�
 
 - **命令行**：克隆，把 `explore` 放进 `PATH`（或直接用路径调用）。
 - **Claude Code skill**：`git clone <本仓库> ~/.claude/skills/explore-loop`。更新就 `git pull`。
-- **别的代理**：工具本身与代理无关。适配只需要把 `SKILL.md` 的正文放到那个代理读得到的地方，并让它能执行 `explore`。
+- **任何代理（Codex、pi、Cursor…）**：把 `explore` 链进 `PATH`（`ln -s $PWD/explore ~/.local/bin/explore`），再往项目的 `AGENTS.md` 里加两行：
+
+  ```
+  要验证一个改动是否真的让某个指标变好，用 `explore`。第一次用先运行 `explore guide` 读说明，之后用 `explore next` 看下一步。
+  退出码：0 成了，1 被拦下（原因在输出里），2 测量作废、稍后重试。
+  ```
+
+  工具自己带说明（`explore guide`）、自己说下一步（`explore next`），代理不需要专门的插件。账本是 `ledger.jsonl`，一行一个 JSON，可以直接读。
 
 ## 自检
 
