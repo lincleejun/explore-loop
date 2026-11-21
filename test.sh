@@ -28,22 +28,46 @@ open(f, "w").write(s)
 PY
 "$X" doctor --snapshot > /dev/null
 expect 0 "next：没校准时叫你先校准" "$X" next; says "explore aa"
-expect 1 "new：没校准不让开实验" "$X" new t --target job --allow speed.txt
+expect 1 "new：没校准不让开实验" "$X" new t --target job --by claude --allow speed.txt
 expect 0 "aa：校准，量出每个指标的噪声" "$X" aa
 expect 0 "doctor：全过" "$X" doctor
-cand() { # cand <速度> [多改的文件] -> 开一个实验并提交改动，编号在 $E
-  "$X" new "t" --target job --allow speed.txt --allow note.txt --predict 0.5 > "$T/new" || { cat "$T/new"; fail=1; }
+round() { # 当前基线的一轮：剖析 + 三个调查员各一个主题
+  D=$R/rounds/$(git -C "$B" rev-parse HEAD | cut -c1-8); mkdir -p "$D"; for f in profiling claude-io claude-parse codex-alloc; do echo 看过了 > "$D/$f.md"; done; }
+preview() { # preview <实验> [评审人] [发现] -> 写提案评审，合同指纹从 next 里取
+  "$X" next > "$T/next" 2>&1; H=$(grep "^$1：" "$T/next" | sed -n 's/.*contract 填 \([0-9a-f]*\).*/\1/p'); [ -n "$H" ] || H=$(sed -n 's/.*"contract":"\([0-9a-f]*\)".*/\1/p' "$R/experiments/$1.proposal.review.md")
+  printf '合同看过了\n```json\n{"kind":"proposal-review","target":"%s","by":"%s","contract":"%s","findings":[%s]}\n```\n' "$1" "${2:-codex}" "$H" "${3:-}" > "$R/experiments/$1.proposal.review.md"; }
+cand() { # cand <速度> [多改的文件] -> 调查、开一个实验、审过提案、提交改动，编号在 $E
+  round; "$X" new "t" --target job --by claude-io --allow speed.txt --allow note.txt --predict 0.5 > "$T/new" || { cat "$T/new"; fail=1; }
   E=$(sed -n 's/^\(E[0-9]*\)：.*/\1/p' "$T/new"); W=$R-$E; echo "$1" > "$W/speed.txt"; echo "$E" >> "$W/note.txt"
-  [ -n "${2:-}" ] && echo y > "$W/$2"; git -C "$W" commit -qam "$E"; }
+  [ -n "${2:-}" ] && echo y > "$W/$2"; git -C "$W" commit -qam "$E"; preview $E; }
 review() { # review <实验> [发现] -> 写评审文件
   printf 'diff 看过了\n```json\n{"kind":"review","target":"%s","sha":"%s","findings":[%s]}\n```\n' "$1" "$(git -C "$R-$1" rev-parse HEAD)" "${2:-}" > "$R/experiments/$1.review.md"; }
 
-cand 0.5
+expect 0 "next：没剖析、没调查时说缺什么" "$X" next; says "profiling.md"; says "要 3 份提案"; says "第 1 / 10 轮"
+expect 1 "new：这个基线没剖析、没调查 → 不让开实验" "$X" new t --target job --by claude
+round; rm "$D/claude-parse.md"
+expect 1 "new：提案不够 width 份 → 不让开实验" "$X" new t --target job --by claude-io
+round; mv "$D/codex-alloc.md" "$D/claude-alloc.md"
+expect 1 "new：配置里的一种代理没参与调查 → 不让开实验" "$X" new t --target job --by claude-io; rm "$D/claude-alloc.md"
+round
+expect 1 "new：--by 不是这一轮的提案 → 拦" "$X" new t --target job --by claude-nothing
+cand 0.5; rm "$R/experiments/$E.proposal.review.md"
+expect 0 "next：叫你先找另一个代理审提案" "$X" next; says "请 codex 审合同"
+expect 1 "没有提案评审 → 拦" "$X" land $E
+preview $E claude
+expect 1 "提案人审自己的提案 → 拦" "$X" land $E
+preview $E codex '{"where":"合同说缓冲区会涨，代码里它是定长的","blocking":true}'
+expect 1 "提案评审有挡开工的发现 → 拦" "$X" land $E
+preview $E
 expect 0 "next：指出下一条命令" "$X" next; says "explore land $E"
 expect 0 "land --dry-run：各步都过，不合并" "$X" land $E --dry-run
 expect 0 "land：变快 → 落地，复用 dry-run 的测量" "$X" land $E; says "复用已有的测量"
 expect 0 "基线快进到了候选的提交" test "$(git -C "$B" rev-parse HEAD)" = "$(git -C "$R-$E" rev-parse HEAD)"
 expect 0 "战役目录可以整个提交" sh -c "git -C '$R' add -A && git -C '$R' commit -qm R01"
+expect 1 "落地后基线变了：没重新剖析 → 不让开实验" "$X" new t --target job --by claude-io
+sed -i '' 's/^rounds = 10 /rounds = 1  /' "$R/explore.toml"
+expect 1 "做满 rounds 轮 → 不让开实验" "$X" new t --target job --by claude-io; says "做满 1 轮"; sed -i '' 's/^rounds = 1  /rounds = 10 /' "$R/explore.toml"
+expect 0 "status：第几轮、每轮几个调查员" "$X" status; says "第 2 / 10 轮，每轮 3 个调查员"
 cand 0.2 other.txt
 expect 1 "改了合同外的文件 → 拦" "$X" land $E
 expect 0 "next：说出上次被拦在哪" "$X" next; says "被拦在「改动在合同范围内」"
@@ -52,6 +76,7 @@ cand 0.5
 expect 1 "没变快 → 拦" "$X" land $E
 expect 0 "--owner-ok：记为破例后落地，不重量" "$X" land $E --owner-ok "所有者同意"; says "复用已有的测量"
 cand 0.1; "$X" land $E --dry-run > /dev/null 2>&1; sed -i '' 's/"speed.txt"/"*"/' "$R/experiments/$E.md"
+expect 1 "合同改了，提案评审是旧的 → 拦" "$X" land $E; preview $E
 expect 1 "过闸门后改合同 → 拦" "$X" land $E
 expect 0 "--amend：留痕后放行" "$X" land $E --amend "范围写窄了"
 cand 0.05; echo 'echo "PERF job $(cat out.bin) s"' > "$W/measure.sh"; git -C "$W" commit -qam drop; expect 1 "候选改了测量工具 → 拦" "$X" land $E

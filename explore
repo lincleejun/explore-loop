@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """explore：可测量改进实验的工具。它管三件事：量得对不对、能不能落地、记没记账。
 
-日常（quick，默认）：
+日常：
   explore init DIR --repo REPO --measure CMD --test CMD [--build CMD]   建战役目录和基线 worktree
   explore aa                        校准：同一份代码量两边，得到每个指标的噪声。换机器、换测量命令后重做
-  explore new "想法" --target 指标 [--allow 'src/x/*'] [--predict 数]   建实验：编号、worktree、一页记录
-  explore land E### [--dry-run]     闸门：范围 → 测试 → 不变量 →（strict：评审）→ 测量 → 判定 → 快进合并 → 记账
+  （每个新基线一轮，共 loop.rounds 轮：剖析写进 rounds/<基线>/profiling.md，loop.width 个调查员各查一个主题，各交一份 rounds/<基线>/<代理>-<主题>.md）
+  explore new "想法" --target 指标 --by 调查员 [--allow 'src/x/*'] [--predict 数]   建实验：编号、worktree、一页记录
+  （另一个代理审合同，写 experiments/E###.proposal.review.md）
+  explore land E### [--dry-run]     闸门：提案评审 → 范围 → 测试 → 不变量 →（strict：代码评审）→ 测量 → 判定 → 快进合并 → 记账
   explore close E### --as 放弃|拒绝|改向 --why 理由
   explore next                      现在卡在哪，下一条命令是什么
   explore status                    账本（每个实验的预测对实测）
@@ -33,7 +35,7 @@ import argparse, contextlib, datetime, fcntl, fnmatch, hashlib, json, math, os, 
 P = pathlib.Path
 HERE = P(__file__).resolve().parent
 LINE = re.compile(r"(?:PERF|BENCH) (.+?) (-?\d+(?:\.\d+)?(?:[eE]-?\d+)?) (s|ms)\s*$|METRIC (lower|higher|exact) (.+?) (\S+) (\S+)\s*$")
-NEED = {"contract": ["id", "title", "targets"], "review": ["target", "sha", "findings"]}   # 机器要用的字段，别的随便写
+NEED = {"contract": ["id", "title", "targets"], "review": ["target", "sha", "findings"], "proposal-review": ["target", "by", "contract", "findings"]}   # 机器要用的字段，别的随便写
 DONE = ("接受", "放弃", "拒绝", "改向")
 
 
@@ -52,6 +54,9 @@ def git(wt, *a, ok=False):
     p = subprocess.run(["git", "-C", str(wt), *a], capture_output=True, text=True)
     if p.returncode and not ok: die(f"git {' '.join(a)}（{wt}）：{p.stderr.strip()}")
     return p.stdout.strip()
+
+
+def slug(name): return re.sub(r"[^\w.-]", "-", name)   # 代理名 -> 文件名
 
 
 def now(): return datetime.datetime.now().isoformat(timespec="seconds")
@@ -152,6 +157,21 @@ class Run:
     def path(self, key): return (self.dir / (self.c.get(key) or die(f"explore.toml 缺 {key}"))).resolve()
     def cmd(self, name): return self.c.get("commands", {}).get(name, "")
     def wt(self, eid): return P(f"{self.dir}-{eid}")
+    def agents(self, role): return self.c.get("agents", {}).get(role, [])
+    def round(self): return self.dir / "rounds" / git(self.base, "rev-parse", "HEAD")[:8]
+
+    def loop(self, key): return self.c.get("loop", {}).get(key, {"rounds": 10, "width": 3}[key])   # 深度：做几轮；宽度：每轮几个调查员
+    def kind(self, by): return max((a for a in self.agents("investigate") if by == slug(a) or by.startswith(slug(a) + "-")), key=len, default=None)   # 提案文件名 -> 哪个代理
+    def round_no(self): return len({d.name for d in (self.dir / "rounds").glob("*") if d.is_dir()} | {self.round().name})   # 当前基线是第几轮
+
+    def round_todo(self):
+        """当前基线这一轮还缺什么：剖析，和 width 份提案（每份一个主题，配置里的每种代理至少一份）。基线一变（落地）就是新的一轮。"""
+        d = self.round(); full = lambda f: f.exists() and f.read_text().strip(); w = self.loop("width")
+        if self.round_no() > self.loop("rounds"): return [f"已经做满 {self.loop('rounds')} 轮（explore.toml 的 loop.rounds）：收尾写报告。所有者要继续就调大它"]
+        got = [self.kind(f.stem) for f in d.glob("*.md") if f.name != "profiling.md" and full(f)] if d.is_dir() else []
+        return ([] if full(d / "profiling.md") else [f"剖析当前基线，把分段数字和这一轮的 {w} 个调查主题写进 {d / 'profiling.md'}"]) + \
+               ([] if len(got) >= w and None not in got else [f"要 {w} 份提案（loop.width），每份一个不同的主题，现在有 {len(got) - got.count(None)} 份：{d}/<代理>-<主题>.md，代理是 {' / '.join(self.agents('investigate'))}"]) + \
+               [f"调查员 {a} 这一轮一份都没交：{d / (slug(a) + '-<主题>.md')}" for a in self.agents("investigate") if a not in got]
 
     def state(self, **kw):
         f = self.dir / "state.json"; s = json.loads(f.read_text()) if f.exists() else {}
@@ -224,7 +244,7 @@ def check(path):
     b = block(path); kind = b.get("kind")
     errs = [f"缺 {k}" for k in NEED[kind] if k not in b] if kind in NEED else [f"kind 必须是 {' / '.join(NEED)}"]
     if kind == "contract" and not errs and not b["targets"]: errs.append("targets 不能空")
-    if kind == "review" and not errs: errs += [f"第 {i + 1} 条发现缺 where 或 blocking" for i, f in enumerate(b["findings"]) if "where" not in f or "blocking" not in f]
+    if kind in ("review", "proposal-review") and not errs: errs += [f"第 {i + 1} 条发现缺 where 或 blocking" for i, f in enumerate(b["findings"]) if "where" not in f or "blocking" not in f]
     return b, errs
 
 
@@ -234,6 +254,18 @@ def contract(R, eid):
     b, errs = check(f)
     if errs or b.get("kind") != "contract" or b["id"] != eid: die(f"{f} 的 json 块不合格：{'；'.join(errs) or 'kind / id 不对'}")
     return b, hashlib.sha256(json.dumps(b, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:10]
+
+
+def proposal_review(R, eid, k, khash):
+    """门 1：另一个代理审过这份合同（不是代码）。返回还差什么。"""
+    f = R.dir / "experiments" / f"{eid}.proposal.review.md"; who = [a for a in R.agents("review") if a != R.kind(k.get("by") or "")]
+    if not R.kind(k.get("by") or ""): return [f"合同的 by（{k.get('by')}）对不上 agents.investigate 里的调查员"]
+    if not f.exists(): return [f"没有 {f.name}：请 {' 或 '.join(who)} 审合同 experiments/{eid}.md，结尾的块里 contract 填 {khash}"]
+    rv, errs = check(f)
+    if errs or rv["kind"] != "proposal-review" or rv["target"] != eid: return errs or [f"{f.name} 要的是 kind=proposal-review、target={eid} 的块"]
+    return ([] if rv["by"] in who else [f"评审人 {rv['by']} 不行：要 agents.review 里的、而且不是提案人 {k['by']}（可选：{'，'.join(who)}）"]) + \
+           ([] if rv["contract"] == khash else [f"审的是合同 {rv['contract']}，现在是 {khash}：合同改过，重审"]) + \
+           [f"挡开工：{x['where']}" for x in rv["findings"] if x["blocking"]]
 
 
 # ---------- 测量 ----------
@@ -290,7 +322,7 @@ def c_init(a):
     d = P(a.dir).resolve(); repo = P(a.repo).resolve(); name = d.name; base = P(f"{d}-base")
     if d.exists() or base.exists(): die(f"{d} 或 {base} 已经存在")
     t = (HERE / "templates" / "explore.toml").read_text()
-    for k, v in (("<REPO>", str(repo)), ("<BRANCH>", f"explore/{name}-base"), ("<BASE>", str(base)), ("<BUILD>", a.build), ("<MEASURE>", a.measure), ("<TEST>", a.test)):
+    for k, v in (("<REPO>", str(repo)), ("<BRANCH>", f"explore/{name}-base"), ("<BASE>", str(base)), ("<ROUNDS>", a.rounds), ("<WIDTH>", a.width), ("<BUILD>", a.build), ("<MEASURE>", a.measure), ("<TEST>", a.test)):
         t = t.replace(f'"{k}"', json.dumps(v, ensure_ascii=False))   # JSON 字符串也是合法的 TOML 字符串
     tomllib.loads(t)   # 先确认配置写得出来，再动仓库
     git(repo, "worktree", "add", "-q", "--orphan", "-b", f"explore/{name}-log", str(d))
@@ -305,6 +337,11 @@ def c_init(a):
 def static(R):
     """不用跑任何东西就能查的配置问题。land 每次都查。"""
     errs = [f"commands.{n} 是空的" for n in ("measure", "test") if not R.cmd(n)]
+    inv, rev = R.agents("investigate"), R.agents("review")
+    if not inv or not rev: errs.append("explore.toml 的 [agents] 要配 investigate（调查员）和 review（提案评审），各至少一个")
+    if R.loop("width") < max(2, len(inv)) or R.loop("rounds") < 1: errs.append(f"loop.width 至少是 2，且不少于调查代理的种数（{len(inv)}）；loop.rounds 至少是 1")
+    errs += [f"调查员 {x} 的提案没有别人能审：agents.review 里要有一个不是 {x} 的" for x in inv if rev and not set(rev) - {x}]
+    if len({slug(x) for x in inv}) != len(inv) or "profiling" in map(slug, inv): errs.append("agents.investigate 里的名字换成文件名后要互不相同，且不能叫 profiling")
     if not R.base.is_dir(): return errs + [f"base_worktree {R.base} 不存在"]
     if git(R.base, "rev-parse", "--abbrev-ref", "HEAD") != R.c.get("branch"): errs.append(f"base_worktree 检出的不是战役分支 {R.c.get('branch')}")
     for d in R.c.get("datasets", []):
@@ -354,19 +391,21 @@ def c_ab(a):
 
 
 def c_new(a):
-    R = Run(a.run); aa, why = R.calibrated(); aa or die(why)
+    R = Run(a.run); static(R) and die("；".join(static(R))); aa, why = R.calibrated(); aa or die(why)
+    todo = R.round_todo(); todo and die("这个基线的调查还没做完，不开实验：\n  " + "\n  ".join(todo))
+    if not ((R.round() / f"{a.by}.md").exists() and R.kind(a.by)): die(f"--by {a.by} 不是这一轮的提案。有的是：{'，'.join(sorted(f.stem for f in R.round().glob('*.md') if f.name != 'profiling.md'))}")
     ids = [int(m[1]) for f in (R.dir / "experiments").glob("E*.md") if (m := re.match(r"E(\d+)\.md", f.name))]
     eid = a.id or f"E{max(ids, default=0) + 1:03d}"; wt = R.wt(eid); f = R.dir / "experiments" / f"{eid}.md"
     if f.exists() or wt.exists(): die(f"{eid} 已经存在")
     miss = [t for t in a.target if t not in aa["median"]]
     if miss: die(f"目标 {miss} 不在校准量到的指标里。有的是：{'，'.join(sorted(aa['median']))}")
-    k = {"kind": "contract", "id": eid, "title": a.title, "targets": a.target, "allowed": a.allow or ["*"],
+    k = {"kind": "contract", "id": eid, "title": a.title, "by": a.by, "targets": a.target, "allowed": a.allow or ["*"],
          "predict": {t: [round(aa["median"][t], 6), a.predict] for t in a.target}, "min_gain": {}}
     branch = re.sub(r"-base$", "", R.c["branch"]) + f"-{eid}"
     git(R.base, "worktree", "add", "-q", "-b", branch, str(wt), R.c["branch"])
     f.write_text((HERE / "templates" / "experiment.md").read_text().replace("<ID>", eid).replace("<TITLE>", a.title).replace("<DATE>", now()[:10])
                  .replace("<SHA>", git(R.base, "rev-parse", "--short", "HEAD")).replace("<JSON>", json.dumps(k, ensure_ascii=False, indent=1)))
-    print(f"{eid}：合同 {f}\n      worktree {wt}（分支 {branch}）\n在 worktree 里实现、提交，然后 explore land {eid}")
+    print(f"{eid}：合同 {f}\n      worktree {wt}（分支 {branch}）\n写完合同先过提案评审（explore next 说找谁、怎么写），再在 worktree 里实现、提交，然后 explore land {eid}")
 
 
 def c_land(a):
@@ -379,6 +418,7 @@ def c_land(a):
     def common(w): return P(git(w, "rev-parse", "--path-format=absolute", "--git-common-dir", ok=True) or "/nonexistent")
     with machine_lock():
         step("配置", static(R) + ([] if wt.is_dir() and common(wt) == common(R.base) else [f"{wt} 不是这个仓库的 worktree"]))
+        step("提案评审：另一个代理审过这份合同，没有挡开工的发现", proposal_review(R, eid, k, khash))
         frozen = R.state().get("contracts", {})
         if frozen.get(eid, khash) != khash and not a.amend: step("合同没被改过", ["合同的 json 块在第一次过闸门之后改过。确实要改：--amend \"理由\"（会记账）"])
         if frozen.get(eid) != khash:
@@ -413,14 +453,14 @@ def c_land(a):
         if bad and a.owner_ok: print("破例  判定没过，所有者批准：" + a.owner_ok + "".join(f"\n      {m}" for m in bad))
         else: step("判定：目标变好，其余没有回归", bad)
         step("过闸门期间什么都没变", ([] if git(wt, "rev-parse", "HEAD") == sha and not clean(wt) else ["候选变了"]) + ([] if git(R.base, "rev-parse", "HEAD") == tip else ["基线变了"]) + ([] if contract(R, eid)[1] == khash else ["记录里的数据块变了"]) + locked_changes(R))
-        row = {"id": eid, "title": k["title"], "status": "接受", "sha": sha, "base": tip, "measure": str(out.relative_to(R.dir)), "contract": khash,
+        row = {"id": eid, "title": k["title"], "status": "接受", "by": k["by"], "proposal_review": block(R.dir / "experiments" / f"{eid}.proposal.review.md")["by"], "sha": sha, "base": tip, "measure": str(out.relative_to(R.dir)), "contract": khash,
                "exception": a.owner_ok if bad else None, "remeasure": a.remeasure,
                "targets": {t: {"predicted": (k.get("predict", {}).get(t) or [None, None])[1], "base": by[t].get("base"), "cand": by[t].get("cand"), "verdict": by[t]["verdict"]} for t in k["targets"]},
                "moved": {m: r["verdict"] for m, r in by.items() if not r.get("target") and r["verdict"] not in ("证据不足", "相同")}}
         if a.dry_run: print("全部通过（--dry-run，没有合并；正式落地会复用这次测量）"); return
         git(R.base, "merge", "--ff-only", sha)   # 快进：基线的提交就是刚量过的那个提交
         R.log("ledger.jsonl", row); R.state(baseline=sha)
-    print(f"{eid} 落地：{R.c['branch']} → {sha[:8]}。有新的事实或陷阱就写进 ledger.md")
+    print(f"{eid} 落地：{R.c['branch']} → {sha[:8]}。有新的事实或陷阱就写进 ledger.md\n基线变了，瓶颈可能移到了别处：这一轮在途的实验收完后，重新剖析、重新派调查员，再开新实验（explore next）")
 
 
 def c_close(a):
@@ -446,20 +486,25 @@ def c_next(a):
     todo = [f.stem for f in sorted((R.dir / "experiments").glob("E*.md")) if not f.name.endswith(".review.md") and last.get(f.stem, {}).get("status") not in DONE]
     for eid in todo:
         wt = R.wt(eid); row = last.get(eid); ahead = git(wt, "rev-list", "--count", f"{R.c['branch']}..HEAD", ok=True) if wt.is_dir() else ""
-        if not wt.is_dir(): msg = f"worktree {wt} 不在了：重建它，或 explore close {eid} --as 放弃 --why …"
+        k, khash = contract(R, eid); pr = proposal_review(R, eid, k, khash)
+        if pr: msg = f"提案评审（contract 填 {khash}）：{pr[0]}"
+        elif not wt.is_dir(): msg = f"worktree {wt} 不在了：重建它，或 explore close {eid} --as 放弃 --why …"
         elif ahead in ("", "0"): msg = f"还没有提交。在 {wt} 里实现并提交"
         elif row and row["status"] == "拦下": msg = f"上次被拦在「{row['step']}」：{'；'.join(row['why'])[:160]}。修好后 explore land {eid}，或 explore close {eid} --as …"
         elif R.strict and not (R.dir / "experiments" / f"{eid}.review.md").exists(): msg = f"explore land {eid} --dry-run，然后请评审写 experiments/{eid}.review.md"
         else: msg = f"explore land {eid}"
         print(f"{eid}：{msg}")
-    if not todo: print('没有进行中的实验。开一个：explore new "想法" --target <指标>')
+    rt = R.round_todo()
+    if rt and todo: print(f"基线已经走到 {R.round().name}：在途的实验先收完（落地或 close），再剖析新基线、重派调查员，然后才能开新实验")
+    elif rt: print(f"第 {R.round_no()} / {R.loop('rounds')} 轮（基线 {R.round().name}）还没调查完。调查员只读，一条消息里并行派出，每人一个不同的主题；说明里带上 explore status 和 ledger.md：\n  " + "\n  ".join(rt))
+    elif not todo: print(f'第 {R.round_no()} / {R.loop("rounds")} 轮，没有进行中的实验。从 {R.round()} 的提案里挑：explore new "想法" --target <指标> --by <提案文件名，不带 .md>')
     dirty = git(R.dir, "status", "--porcelain", ok=True)
     if dirty: print(f"战役目录有 {len(dirty.splitlines())} 个没提交的文件：git -C {R.dir} add -A && git -C {R.dir} commit -m …")
 
 
 def c_status(a):
     R = Run(a.run); s = R.state(); rows = R.rows("ledger.jsonl")
-    print(f"基线 {s.get('baseline', '未量')[:8]}　校准 {s.get('aa', {}).get('time', '没做')}　模式 {'strict（落地要评审）' if R.strict else 'quick'}")
+    print(f"第 {R.round_no()} / {R.loop('rounds')} 轮，每轮 {R.loop('width')} 个调查员　基线 {s.get('baseline', '未量')[:8]}　校准 {s.get('aa', {}).get('time', '没做')}　模式 {'strict（落地还要代码评审）' if R.strict else '提案评审'}")
     print("| 编号 | 处置 | 标题 | 目标：基线 → 预测 / 实测 | 被拦次数 |\n|---|---|---|---|---|")
     for eid, r in R.last().items():
         why = r.get("why", ""); why = "；".join(why) if isinstance(why, list) else why
@@ -523,11 +568,11 @@ def main():
         p = sub.add_parser(name); p.set_defaults(fn=fn)
         for names, kw in args: p.add_argument(*names, **kw)
     pairs = (["--pairs"], {"type": int})
-    add("init", c_init, (["dir"], {}), (["--repo"], {"required": True}), (["--start"], {"default": "HEAD"}), (["--measure"], {"default": ""}), (["--test"], {"default": ""}), (["--build"], {"default": ""}))
+    add("init", c_init, (["dir"], {}), (["--repo"], {"required": True}), (["--start"], {"default": "HEAD"}), (["--rounds"], {"type": int, "default": 10}), (["--width"], {"type": int, "default": 3}), (["--measure"], {"default": ""}), (["--test"], {"default": ""}), (["--build"], {"default": ""}))
     add("doctor", c_doctor, (["--snapshot"], {"action": "store_true"}))
     add("aa", c_aa, pairs, (["--redo"], {}))
     add("ab", c_ab, (["base"], {}), (["cand"], {}), pairs)
-    add("new", c_new, (["title"], {}), (["--target"], {"action": "append", "required": True}), (["--allow"], {"action": "append"}), (["--predict"], {"type": float}), (["--id"], {}))
+    add("new", c_new, (["title"], {}), (["--target"], {"action": "append", "required": True}), (["--allow"], {"action": "append"}), (["--predict"], {"type": float}), (["--id"], {}), (["--by"], {"required": True}))
     add("land", c_land, (["id"], {}), (["wt"], {"nargs": "?"}), (["--dry-run"], {"action": "store_true"}), (["--owner-ok"], {}), (["--amend"], {}), (["--remeasure"], {}))
     add("close", c_close, (["id"], {}), (["--as"], {"dest": "status", "required": True, "choices": ["放弃", "拒绝", "改向"]}), (["--why"], {"required": True}))
     add("holdout", c_holdout, (["name"], {}), (["--why"], {"required": True}), (["cmd"], {"nargs": "+"}))

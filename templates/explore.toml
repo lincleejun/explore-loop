@@ -8,6 +8,14 @@ strict = false                  # true = 落地前要一份针对这份代码的
 locked = []                     # 战役期间不许变的路径（模型权重、评测集）。explore doctor --snapshot 记指纹
 harness = []                    # 测量工具的文件（通配）。候选不许改它们；它们变了要重新校准。例：["bench/*", "measure.sh"]
 
+[agents]                        # 谁调查、谁审提案。名字是你派得出去的代理：子代理类型、模型、外部工具（codex 走 codex.sh）。工具只核对记录里写的人
+investigate = ["claude", "codex"]   # 调查用哪几种代理：只读、并行。每种每轮至少交一份 rounds/<基线>/<名字>-<主题>.md
+review = ["codex", "claude"]        # 提案评审：审合同，不能是提这个方案的调查员
+
+[loop]                          # 所有者定。开工前问一句，没说就用默认
+rounds = "<ROUNDS>"             # 深度：做几轮（一轮 = 一个基线上的剖析、调查、实验）。默认 10，做满就收尾
+width = "<WIDTH>"               # 宽度：每轮几个调查员，各查一个不同的主题。默认 3，一般 3–5，代码库大可以更多
+
 [commands]                      # 都在被测的 worktree 里执行
 build = "<BUILD>"               # 测量前两边各构建一次。不用构建就留空
 measure = "<MEASURE>"           # 跑一遍，打印指标行：PERF 名称 数字 s|ms，或 METRIC lower|higher|exact 名称 值 单位

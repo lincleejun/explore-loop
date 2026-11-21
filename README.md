@@ -1,18 +1,19 @@
 # explore-loop
 
-Verify improvement ideas by measurement. You (or an agent) bring the idea; `explore` measures the candidate against the baseline in pairs, decides *better / regression / not enough evidence*, lands only what passes, and logs every attempt.
+A measured improvement loop for agents: profile the baseline, investigate in parallel, have a different agent review each proposal, then verify. `explore` refuses to open or land an experiment until those records exist; it measures the candidate against the baseline in pairs, decides *better / regression / not enough evidence*, lands only what passes, and logs every attempt.
 
-验证改进想法的工具：想法、理由、证据是人或模型的事，量得对不对、能不能落地、记没记账是它的事。
+探索循环的工具：每个基线先剖析、多个调查员并行提案、另一个代理审提案，这三步必须做过才能开实验和落地；量得对不对、能不能落地、记没记账也是它的事。
 
 ```sh
-explore init ~/wt/demo --repo <仓库> --measure '<打印指标行的命令>' --test '<测试命令>'
+explore init ~/wt/demo --repo <仓库> --measure '<打印指标行的命令>' --test '<测试命令>' --rounds 10 --width 3   # 深度：几轮；宽度：每轮几个调查员
 cd ~/wt/demo
 explore aa                                  # 校准：每个指标的噪声
-explore new "<想法>" --target "<指标>"      # 编号、一页记录、一个 worktree
+explore next                                # 每个新基线一轮：剖析 → 调查员并行提案 → 另一个代理审提案
+explore new "<想法>" --target "<指标>" --by <调查员>   # 编号、一页记录、一个 worktree
 explore land E001                           # 验证；过了合进基线，没过告诉你拦在哪
 ```
 
-完整说明在 [`SKILL.md`](SKILL.md)：需要你给什么、怎么验证、判定规则的数据、工具管不了什么。
+完整说明在 [`SKILL.md`](SKILL.md)：一轮怎么走、需要你给什么、怎么验证、判定规则的数据、工具管不了什么。
 
 ## 里面有什么
 
@@ -22,7 +23,7 @@ explore land E001                           # 验证；过了合进基线，没�
 | `SKILL.md` | 给代理读的说明。带 Claude Code skill 的 frontmatter，正文是普通 Markdown |
 | `templates/` | `explore init` 和 `explore new` 用的三个模板 |
 | `test.sh` | 端到端自检：在临时仓库里走完整流程，该拦的要拦 |
-| `codex.sh` | 可选：让 Codex 只读地评审一个仓库 |
+| `codex.sh` | 让 Codex 只读地当调查员或评审（`[agents]` 里配了 `codex` 时用） |
 
 ## 安装
 

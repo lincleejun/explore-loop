@@ -8,5 +8,6 @@
 <JSON>
 ```
 
+`by` 是提出它的调查员；提案评审（`experiments/<ID>.proposal.review.md`）必须由另一个代理写。
 `targets` 变好、其余指标没有回归才落地。`allowed` 是允许改的文件（`*` = 不限）。`predict` 是 [基线, 预测]，只记分不影响落地。
 `min_gain` 可以给目标设最低收益，例如 `{"job": 0.02}`。这个块第一次过闸门后冻结。

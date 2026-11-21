@@ -1,7 +1,7 @@
 {
   "name": "explore-loop",
   "version": "0.1.0",
-  "description": "Verify improvement ideas by measurement: paired A/B, a landing gate, and a ledger",
+  "description": "Agent improvement loop: profile, parallel investigators, proposal review, paired A/B, a landing gate, and a ledger",
   "keywords": [
     "pi-package",
     "agent-skill",

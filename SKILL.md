@@ -1,22 +1,54 @@
 ---
 name: explore-loop
-description: Verify improvement ideas on any project by measurement (speed, accuracy, memory, size). You bring the idea, the reasoning and the evidence; the tool measures candidate against baseline in pairs, decides better / regression / not enough evidence, lands only what passes, and logs every attempt. Use when asked to optimize or tune something measurable, to "explore", "跑探索循环", "展开优化", "多轮实验", or to resume / audit such work.
+description: Run a measured improvement loop on any project (speed, accuracy, memory, size). Each round profiles the accepted baseline, sends several read-only investigator agents in parallel, has a different agent review each proposal, then implements in isolated worktrees; the tool measures candidate against baseline in pairs, decides better / regression / not enough evidence, lands only what passes, and logs every attempt. Use when asked to optimize or tune something measurable, to "explore", "跑探索循环", "展开优化", "多轮实验", or to resume / audit such work.
 ---
 
 # explore-loop
 
-**想法、理由、证据是你的事；验证是工具的事。**
-怎么找瓶颈、提什么方案、派不派子代理、记录写多长，这里都不规定。这里只保证一件事：一个改动说自己有用，得量出来才算数。
+**每一轮：剖析基线 → 多个调查员并行提案 → 另一个代理审提案 → 隔离通道里实现 → 工具验证。**
+提什么方案、记录写多长由你定。剖析、调查、提案评审这三步必须做过，工具不见到记录就不让开实验、不让落地；一个改动说自己有用，得量出来才算数。
 
 工具是本目录的 `./explore`（Python 3.11+，只用标准库）。
 
 ```sh
-explore init ~/wt/<名称> --repo <仓库> --measure '<打印指标行的命令>' --test '<测试命令>' [--build '<构建命令>']
+explore init ~/wt/<名称> --repo <仓库> --measure '<打印指标行的命令>' --test '<测试命令>' [--build '<构建命令>'] [--rounds 10] [--width 3]
 cd ~/wt/<名称>
 explore aa                                  # 校准一次：每个指标的噪声有多大
-explore new "<想法>" --target "<指标>"      # 给你一个编号、一页记录、一个 worktree
+explore next                                # 这一轮还缺什么：剖析、哪个调查员没交、哪个合同没审
+explore new "<想法>" --target "<指标>" --by <调查员>   # 给你一个编号、一页记录、一个 worktree
 explore land E001                           # 验证；过了就合进基线，没过告诉你拦在哪
 ```
+
+## 一轮
+
+```
+已接受的基线 ──剖析──▶ 调查员（只读，并行）──提案──▶ 负责人：挑提案，写合同
+     ──▶ 提案评审（另一个代理）──▶ 验证员（各占一个 worktree，并行）：实现、自查、提交
+     ──▶ explore land ──▶ 落地的补丁推进基线，重新剖析；所有结果（含失败）进账本，供下一轮提案
+```
+
+**深度和宽度由所有者定，开工前问一句**（没说就用默认），写在 `explore.toml` 的 `[loop]`：
+
+- `rounds`，深度：做几轮。默认 10。做满了工具不再让开实验，收尾写报告。
+- `width`，宽度：每轮派几个调查员，各查一个不同的主题。默认 3，一般 3–5；代码库大、剖析里热点分散就再多。
+
+谁调查、谁审提案在 `[agents]` 里配，名字是你派得出去的代理：子代理类型、不同的模型、外部工具（`codex` 走本目录的 `codex.sh`）。
+主题每轮从剖析里来（例：解析、IO、内存分配、并发、算法本身），一个调查员一个，不重叠；同一种代理可以查好几个主题。
+
+| 步骤 | 谁 | 交什么 | 工具怎么拦 |
+|---|---|---|---|
+| 剖析 | 负责人（主会话） | `rounds/<基线>/profiling.md`：基线的时间或错误分布在哪，带得出数字的命令；结尾列出这一轮的 `width` 个调查主题 | 没有就不让 `new` |
+| 调查 | `width` 个调查员，一条消息里并行派出，只读；`agents.investigate` 里每种代理至少一个 | `rounds/<基线>/<代理>-<主题>.md`：机制（文件:行）、证据、预测哪个指标从多少到多少；没有值得做的就写没有并给证据 | 不够 `width` 份、或哪种代理没出现，就不让 `new`；`--by` 填提案的文件名 |
+| 提案评审 | `agents.review` 里的一个，不能是提案人 | `experiments/E###.proposal.review.md`，结尾一个块（见下） | 没有、审的不是这版合同、提案人自审、有 blocking 的发现，都不让 `land` |
+| 实现 | 验证员，每个实验一个 worktree；实现可以并行，测量由工具排队 | 提交 | `land` |
+| 裁决 | `explore land` | 账本里的一行 | |
+
+一轮的实验在第一个落地之前都开出来（`explore new`）。基线一动，工具就不再让开新实验：在途的收完（落地的合入新基线后重量，没成的 `close`），再对新基线剖析、调查一次，`rounds/` 下是一个新目录。
+
+- **给调查员的说明**里带上：战役目录（`profile.md`、`ledger.md`）、`explore status` 的输出、本轮的 `profiling.md`、它负责的那一个主题。主题不同，才不会交回同一份东西。
+- **提案评审问的**：改的是通用机制，还是只对基准的夹具和数据有效；账本里同一机制试过吗、旧的失败原因还成立吗；合同引用的代码和数字自己查一遍对不对；预测大于 `explore power` 看得出的幅度吗；漏了哪条不能变的行为。
+  块的格式：`{"kind":"proposal-review","target":"E001","by":"<评审人>","contract":"<explore next 给的指纹>","findings":[{"where":"…","blocking":true}]}`。合同改了要重审。
+- **负责人不写产品代码**，不绕过 `land` 合并。自己提的方案自己验收，验收就不诚实了。
 
 `explore next` 说现在卡在哪；`explore status` 是账本；`explore close E001 --as 放弃|拒绝|改向 --why …` 收掉没成的；
 `explore power` 说在你的噪声下多大的变化才看得出来。
@@ -59,14 +91,15 @@ explore land E001                           # 验证；过了就合进基线，�
 
 ## 要更严的时候
 
-- `explore.toml` 里 `strict = true`：落地还要一份针对这份代码的评审，写在 `experiments/E###.review.md`，结尾一个块：
+- `explore.toml` 里 `strict = true`：除了提案评审，落地还要一份针对这份代码的评审，写在 `experiments/E###.review.md`，结尾一个块：
   `{"kind":"review","target":"E001","sha":"<评审的提交>","findings":[{"where":"…","blocking":true}]}`。有 blocking 的发现就不落地；代码改了要重审。
   让谁评审由你定；另一个模型、不带实现时的上下文，最容易看出测试没覆盖的行为变化。
 - 调参和准确率类的工作：在 `explore.toml` 登记数据集的用途，留出集放在仓库外，只经 `explore holdout` 用并记账。
 
 ## 工具管不了的
 
-- 它防疏忽，不防作弊：评审是谁写的、破例的话是谁说的，它不知道，只留痕。
+- 它防疏忽，不防作弊：剖析和提案是不是真的由那个代理做的、评审是谁写的、破例的话是谁说的，它不知道，只留痕。
+- 提案评审在 `land` 时才核对：先审后实现靠 `explore next` 的顺序提醒，不是强制。指纹只盖合同的 json 块，正文里的机制和证据改了不会要求重审。
 - 留出集挡不住读取；`locked` 只在落地时核对文件大小和修改时间。
 - 只支持"一个仓库、候选是它的 worktree"。测量命令在各自的 worktree 里执行：把测量工具的文件写进 `explore.toml` 的 `harness`，
   候选就不许改它们；要改就直接提交到战役分支再重新校准。
@@ -90,7 +123,7 @@ explore land E001                           # 验证；过了就合进基线，�
 
 ## 收尾
 
-停下来（做满了、所有者叫停、连续没有落地）之前：`explore status` 看一眼从没当过目标的指标，报告里说明为什么没查；
+停下来（做满 `rounds` 轮、所有者叫停、一轮下来没有落地）之前：`explore status` 看一眼从没当过目标的指标，报告里说明为什么没查；
 留出集只在这时用一次，结果和已关掉的实验相反就回写；量的环境和产品的差别、没实测只审过代码的路径，在报告里各写一句。
 
 改这个 skill：`./explore selftest` 和 `./test.sh` 都要过。
