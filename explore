@@ -433,6 +433,8 @@ def c_holdout(a):
     used = [r for r in R.rows("holdout.jsonl") if r["name"] == a.name]
     if used: print(f"警告：{a.name} 已经用过 {len(used)} 次（{'；'.join(r['why'] for r in used)}）。再用它得到的结果不再是独立验证", file=sys.stderr)
     R.log("holdout.jsonl", {"name": a.name, "role": d["role"], "why": a.why, "cmd": a.cmd})
+    shut = [i for i, r in R.last().items() if r["status"] in ("放弃", "拒绝", "改向")]
+    if shut: print(f"留出集的结果要是和已经关掉的实验（{'，'.join(shut)}）的结论相反，回写到它们的记录和 ledger.md：它们是在别的数据上关掉的", file=sys.stderr)
     sys.exit(subprocess.run(a.cmd, env={**os.environ, "EXPLORE_DATA": str((R.dir / d["path"]).resolve())}).returncode)
 
 
@@ -463,6 +465,9 @@ def c_status(a):
         why = r.get("why", ""); why = "；".join(why) if isinstance(why, list) else why
         t = "；".join(f"{m} {v['base']:.4g} → {v['predicted']} / {v['cand']:.4g}" for m, v in r.get("targets", {}).items() if v.get("base") is not None) or why[:80]
         print(f"| {eid} | {r['status']}{'（破例）' if r.get('exception') else ''}{'（重量过）' if r.get('remeasure') else ''} | {r['title']} | {t} | {sum(x['id'] == eid and x['status'] == '拦下' for x in rows)} |")
+    aimed = {t for f in (R.dir / "experiments").glob("E*.md") if not f.name.endswith(".review.md") for t in block(f).get("targets", [])}
+    idle = sorted(set(s.get("aa", {}).get("median", {})) - aimed)
+    if idle: print(f"从没当过目标的指标（没人查过，不等于没有空间）：{'，'.join(idle)}")
     for d in R.c.get("datasets", []): print(f"数据集 {d['name']}（{d['role']}）：用过 {sum(r['name'] == d['name'] for r in R.rows('holdout.jsonl'))} 次")
 
 
