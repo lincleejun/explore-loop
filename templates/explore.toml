@@ -1,45 +1,45 @@
-# 战役的机器可读部分。explore 的每条强制检查都从这里读；这里没写的约束只是文字，没人拦。
-# 路径相对这个文件，也可以写绝对路径。构建和测试留下的文件要在目标仓库的 .gitignore 里：worktree 不干净，explore 不量。
+# The machine-readable part of the campaign. Every check explore enforces is read from here; a constraint that is not here is only words, and nothing stops it.
+# Paths are relative to this file, or absolute. Build and test output must be in the target repository's .gitignore: explore does not measure a dirty worktree.
 
-repo = "<REPO>"                 # 所有者在用的主检出
-branch = "<BRANCH>"             # 战役分支：落地的补丁快进到这里
-base_worktree = "<BASE>"        # 检出战役分支的 worktree = 当前基线
-strict = false                  # true = 落地前要一份针对这份代码的评审（experiments/E###.review.md）
-locked = []                     # 战役期间不许变的路径（模型权重、评测集）。explore doctor --snapshot 记指纹
-harness = []                    # 测量工具的文件（通配）。候选不许改它们；它们变了要重新校准。例：["bench/*", "measure.sh"]
+repo = "<REPO>"                 # the main checkout the owner works in
+branch = "<BRANCH>"             # the campaign branch: landed patches fast-forward to it
+base_worktree = "<BASE>"        # the worktree that has the campaign branch checked out = the current baseline
+strict = false                  # true = landing also needs a review of this very code (experiments/E###.review.md)
+locked = []                     # paths that must not change during the campaign (model weights, eval sets). explore doctor --snapshot records fingerprints
+harness = []                    # the measuring harness's files (globs). Candidates may not change them; when they change, calibrate again. E.g. ["bench/*", "measure.sh"]
 
-[agents]                        # 谁调查、谁审提案。名字是你派得出去的代理：子代理类型、模型、外部工具（codex 走 codex.sh）。工具只核对记录里写的人
-investigate = ["claude", "codex"]   # 调查用哪几种代理：只读、并行。每种每轮至少交一份 rounds/<基线>/<名字>-<主题>.md
-review = ["codex", "claude"]        # 提案评审：审合同，不能是提这个方案的调查员
+[agents]                        # who investigates and who reviews proposals. A name is an agent you can dispatch: a subagent type, a model, an external tool (codex goes through codex.sh). The tool only checks the names written in the records
+investigate = ["claude", "codex"]   # which kinds of agent investigate: read-only, in parallel. Each kind hands in at least one rounds/<base>/<name>-<topic>.md per round
+review = ["codex", "claude"]        # proposal reviewers: they review the contract, and may not be the investigator who proposed it
 
-[loop]                          # 所有者定。开工前问一句，没说就用默认
-rounds = "<ROUNDS>"             # 深度：做几轮（一轮 = 一个基线上的剖析、调查、实验）。默认 10，做满就收尾
-width = "<WIDTH>"               # 宽度：每轮几个调查员，各查一个不同的主题。默认 3，一般 3–5，代码库大可以更多
+[loop]                          # the owner decides. Ask before starting; use the defaults if they do not say
+rounds = "<ROUNDS>"             # depth: how many rounds (a round = profile, investigate and experiment on one baseline). Default 10; close out when done
+width = "<WIDTH>"               # width: how many investigators per round, each on a different topic. Default 3, usually 3–5, more for a big codebase
 
-[commands]                      # 都在被测的 worktree 里执行
-build = "<BUILD>"               # 测量前两边各构建一次。不用构建就留空
-measure = "<MEASURE>"           # 跑一遍，打印指标行：PERF 名称 数字 s|ms，或 METRIC lower|higher|exact 名称 值 单位
-test = "<TEST>"                 # 退出码 0 = 过。把"有测试被跳过"也算失败
-env = ""                        # 打印环境指纹（编译配置、设备、依赖版本）。变了，旧的校准和测量都不算数
-busy = ""                       # 有输出 = 机器上有别的负载，不量。例：pgrep -fl 'xcodebuild|pytest'
+[commands]                      # all run inside the worktree being measured
+build = "<BUILD>"               # built once on each side before measuring. Leave empty if there is no build
+measure = "<MEASURE>"           # one pass that prints metric lines: PERF name number s|ms, or METRIC lower|higher|exact name value unit
+test = "<TEST>"                 # exit code 0 = pass. Make "a test was skipped" a failure too
+env = ""                        # prints the environment fingerprint (build config, device, dependency versions). When it changes, old calibrations and measurements no longer count
+busy = ""                       # any output = other load on the machine, do not measure. E.g. pgrep -fl 'xcodebuild|pytest'
 
 [rules]
-pairs = 10                      # 基线和候选成对量几对。explore power 告诉你够不够
-alpha = 0.05                    # 一次落地里，纯噪声造成误判的总概率上限
-guard = 5                       # 目标之外的指标，变差超过 5% 才算回归
-floor = 0                       # 再加一条绝对值容忍度（指标自己的单位）。耗时类建议 0.001
-max_load = 0                    # 1 分钟负载超过它，这次测量作废。0 = 不查
+pairs = 10                      # how many baseline/candidate pairs to measure. explore power tells you whether that is enough
+alpha = 0.05                    # upper bound on the total probability that pure noise causes a wrong verdict in one landing
+guard = 5                       # a metric that is not a target counts as regressed only when it is more than 5% worse
+floor = 0                       # an additional absolute tolerance (in the metric's own unit). 0.001 is a good value for durations
+max_load = 0                    # the measurement is void when the 1-minute load is above this. 0 = not checked
 
-# 不变量：每个候选落地前必跑，退出码 0 = 守住了。EXPLORE_BASE = 基线 worktree
+# Invariants: run for every candidate before it lands; exit code 0 = it holds. EXPLORE_BASE = the baseline worktree
 # [[invariants]]
-# name = "开关默认关时输出逐位相同"
+# name = "output is bit-identical with the switch at its default off"
 # cmd = "scripts/same_output.sh $EXPLORE_BASE ."
 
-# 数据集（调参、准确率类项目才需要）。role：train / select（调参选型）/ accept（验收）/ final（留出终验）
-# final 要放在仓库之外，只经 explore holdout 访问
+# Datasets (only for tuning and accuracy work). role: train / select (tuning and model selection) / accept (acceptance) / final (holdout)
+# final must live outside the repository and is reached only through explore holdout
 # [[datasets]]
 # name = "G"
 # path = "/data/eval/g.csv"
 # role = "final"
-# strata = "全球；没参与过调参"
-# leak = "与先验数据同源：评测前扣掉每条样本自己的记录"
+# strata = "global; never used for tuning"
+# leak = "shares a source with the prior data: each sample's own record is removed before evaluation"

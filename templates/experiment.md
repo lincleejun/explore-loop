@@ -1,13 +1,13 @@
 # <ID> <TITLE>
 
-<DATE>　基线 <SHA>
+<DATE>   baseline <SHA>
 
-<想法、理由、证据：怎么写、写多少由你定。读这页的人想知道的是：为什么认为它有用，你看到了什么，哪些行为不能变。>
+<The idea, the reasoning, the evidence: how you write it and how much is up to you. The reader of this page wants to know why you think it helps, what you saw, and which behaviors must not change.>
 
 ```json
 <JSON>
 ```
 
-`by` 是提出它的调查员；提案评审（`experiments/<ID>.proposal.review.md`）必须由另一个代理写。
-`targets` 变好、其余指标没有回归才落地。`allowed` 是允许改的文件（`*` = 不限）。`predict` 是 [基线, 预测]，只记分不影响落地。
-`min_gain` 可以给目标设最低收益，例如 `{"job": 0.02}`。这个块第一次过闸门后冻结。
+`by` is the investigator's proposal this came from; the proposal review (`experiments/<ID>.proposal.review.md`) must be written by a different agent.
+It lands only if `targets` get better and no other metric regresses. `allowed` lists the files that may change (`*` = any). `predict` is [baseline, prediction]; it is scored but does not affect landing.
+`min_gain` can set a minimum gain for a target, e.g. `{"job": 0.02}`. This block is frozen once it first passes the gate.

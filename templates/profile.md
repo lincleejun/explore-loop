@@ -1,13 +1,13 @@
-# <项目>
+# <project>
 
-所有者写，代理开工前读。命令和规则在 `explore.toml`，这里只写它表达不了的。
+Written by the owner, read by the agent before it starts. Commands and rules are in `explore.toml`; this file holds only what that cannot express.
 
-- **要改进什么**：<一句话>
-- **重点**（按权重）：<用户最痛的场景>
-- **不做**：<排除的方向>
-- **停**：<达到多少；或做满 N 个实验；或连续 K 个没有落地>
-- **不能变的**：<输出、接口、格式、与其他平台的一致。能写成命令的放进 `explore.toml` 的 invariants，其余写在这里>
-- **不许的捷径**：<针对哪些夹具、数据、名字做特殊处理算作弊>
-- **评测数据覆盖什么、不覆盖什么**：<地区、来源、尺寸、参与过哪些调参。每个要改进的指标至少有一份数据能让它显出差别；没有就先补数据，不开实验>
-- **量的是什么环境**：<模拟器 / 小输入 / 开发机。和产品差在哪，结论要打几折>
-- **仓库规则**：<测试范围、不许碰的目录、要先问的动作>
+- **What to improve**: <one sentence>
+- **Priorities** (by weight): <the scenarios that hurt users most>
+- **Out of scope**: <directions that are excluded>
+- **Stop**: <a target value; or after N rounds; or after K rounds with no landing>
+- **Must not change**: <output, interfaces, formats, consistency with other platforms. Whatever can be written as a command goes into the invariants in `explore.toml`; the rest goes here>
+- **Forbidden shortcuts**: <special-casing which fixtures, data or names counts as cheating>
+- **What the eval data covers and does not cover**: <regions, sources, sizes, which tuning it was used for. Every metric to improve needs at least one dataset that can show a difference; if there is none, add data first and open no experiment>
+- **What environment is measured**: <simulator / small inputs / dev machine. How it differs from the product and how far to discount the conclusions>
+- **Repository rules**: <test scope, directories not to touch, actions to ask about first>

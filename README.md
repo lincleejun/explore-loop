@@ -1,52 +1,50 @@
 # explore-loop
 
-A measured improvement loop for agents: profile the baseline, investigate in parallel, have a different agent review each proposal, then verify. `explore` refuses to open or land an experiment until those records exist; it measures the candidate against the baseline in pairs, decides *better / regression / not enough evidence*, lands only what passes, and logs every attempt.
-
-探索循环的工具：每个基线先剖析、多个调查员并行提案、另一个代理审提案，这三步必须做过才能开实验和落地；量得对不对、能不能落地、记没记账也是它的事。
+A measured improvement loop for agents: profile the baseline, investigate in parallel, have a different agent review each proposal, then verify. `explore` refuses to open or land an experiment until those records exist; it measures the candidate against the baseline in pairs, decides *better / regression / inconclusive*, lands only what passes, and logs every attempt.
 
 ```sh
-explore init ~/wt/demo --repo <仓库> --measure '<打印指标行的命令>' --test '<测试命令>' --rounds 10 --width 3   # 深度：几轮；宽度：每轮几个调查员
+explore init ~/wt/demo --repo <repo> --measure '<command that prints metric lines>' --test '<test command>' --rounds 10 --width 3   # depth: rounds; width: investigators per round
 cd ~/wt/demo
-explore aa                                  # 校准：每个指标的噪声
-explore next                                # 每个新基线一轮：剖析 → 调查员并行提案 → 另一个代理审提案
-explore new "<想法>" --target "<指标>" --by <调查员>   # 编号、一页记录、一个 worktree
-explore land E001                           # 验证；过了合进基线，没过告诉你拦在哪
+explore aa                                  # calibrate: each metric's noise
+explore next                                # one round per new baseline: profile -> investigators propose in parallel -> a different agent reviews each proposal
+explore new "<idea>" --target "<metric>" --by <proposal>   # an id, a one-page record, a worktree
+explore land E001                           # verify; merged into the baseline if it passes, otherwise it says where it was blocked
 ```
 
-完整说明在 [`SKILL.md`](SKILL.md)：一轮怎么走、需要你给什么、怎么验证、判定规则的数据、工具管不了什么。
+The full instructions are in [`SKILL.md`](SKILL.md): how a round goes, what you have to supply, how verification works, the data behind the verdict rule, what the tool cannot do.
 
-## 里面有什么
+## What is in here
 
-| 文件 | 是什么 |
+| File | What it is |
 |---|---|
-| `explore` | 整个工具。一个 Python 文件，3.11+，只用标准库，不依赖任何代理框架 |
-| `SKILL.md` | 给代理读的说明。带 Claude Code skill 的 frontmatter，正文是普通 Markdown |
-| `templates/` | `explore init` 和 `explore new` 用的三个模板 |
-| `test.sh` | 端到端自检：在临时仓库里走完整流程，该拦的要拦 |
-| `codex.sh` | 让 Codex 只读地当调查员或评审（`[agents]` 里配了 `codex` 时用） |
+| `explore` | The whole tool. One Python file, 3.11+, standard library only, tied to no agent framework |
+| `SKILL.md` | The instructions agents read. It has the frontmatter of a Claude Code skill; the body is plain Markdown |
+| `templates/` | The templates `explore init` and `explore new` use |
+| `test.sh` | End-to-end check: walks the whole flow in a temporary repository; what must be blocked is blocked |
+| `codex.sh` | Has Codex act as a read-only investigator or reviewer (for when `[agents]` lists `codex`) |
 
-## 安装
+## Install
 
-- **命令行**：`npm install -g explore-loop`（需要系统里有 Python 3.11+），或克隆后把 `explore` 放进 `PATH`。
-- **Claude Code skill**：`git clone https://github.com/lincleejun/explore-loop ~/.claude/skills/explore-loop`。更新就 `git pull`。
-- **pi**：`pi install git:github.com/lincleejun/explore-loop`，或 `pi install npm:explore-loop`（仓库本身是一个 pi package，`package.json` 里声明了这个 skill）。之后 `/skill:explore-loop`，或让模型自己按描述加载。
-- **任何代理（Codex、pi、Cursor…）**：把 `explore` 链进 `PATH`（`ln -s $PWD/explore ~/.local/bin/explore`），再往项目的 `AGENTS.md` 里加两行：
+- **Command line**: `npm install -g explore-loop` (needs Python 3.11+ on the system), or clone and put `explore` on your `PATH`.
+- **Claude Code skill**: `git clone https://github.com/lincleejun/explore-loop ~/.claude/skills/explore-loop`. Update with `git pull`.
+- **pi**: `pi install git:github.com/lincleejun/explore-loop`, or `pi install npm:explore-loop` (the repository is itself a pi package; `package.json` declares the skill). Then `/skill:explore-loop`, or let the model load it from the description.
+- **Any agent (Codex, pi, Cursor…)**: link `explore` into your `PATH` (`ln -s $PWD/explore ~/.local/bin/explore`), then add two lines to the project's `AGENTS.md`:
 
   ```
-  要验证一个改动是否真的让某个指标变好，用 `explore`。第一次用先运行 `explore guide` 读说明，之后用 `explore next` 看下一步。
-  退出码：0 成了，1 被拦下（原因在输出里），2 测量作废、稍后重试。
+  To verify that a change really improves a metric, use `explore`. The first time, run `explore guide` to read the instructions; after that, `explore next` says what to do next.
+  Exit codes: 0 done, 1 blocked (the reason is in the output), 2 the measurement is void, retry later.
   ```
 
-  工具自己带说明（`explore guide`）、自己说下一步（`explore next`），代理不需要专门的插件。账本是 `ledger.jsonl`，一行一个 JSON，可以直接读。
+  The tool carries its own instructions (`explore guide`) and says the next step itself (`explore next`), so an agent needs no dedicated plugin. The ledger is `ledger.jsonl`, one JSON object per line, readable directly.
 
-## 自检
+## Self-check
 
 ```sh
 ./explore selftest && ./test.sh
 ```
 
-不要用管道接它们，管道会吞掉退出码。
+Do not pipe them into anything: a pipe swallows the exit code.
 
-思路来自 TabbyML 的 *Beating ClickBench SOTA with a team of agentic systems engineers*；判定规则参考了 benchstat、criterion.rs 和 asv。
+The verdict rule draws on benchstat, criterion.rs and asv.
 
 MIT License.

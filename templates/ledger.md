@@ -1,3 +1,3 @@
-# 账本：<项目>
+# Ledger: <project>
 
-实验表是 `explore status`。这里记工具记不了的：被证实的事实（带实验号）、踩过的坑、等所有者决定的事。
+The table of experiments is `explore status`. This file holds what the tool cannot record: confirmed facts (with the experiment id), traps already hit, decisions waiting for the owner.

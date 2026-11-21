@@ -1,8 +1,8 @@
 #!/bin/zsh
-# 让 Codex 只读地看一个仓库并回答一份任务说明；答案写到文件。调查员和评审意见都走这里。
-# 用法: codex.sh <仓库路径> <任务说明文件> <答案输出文件>
+# Have Codex look at a repository read-only and answer a brief; the answer goes to a file. Investigators and reviews both go through here.
+# Usage: codex.sh <repository path> <brief file> <answer output file>
 set -eu
-repo=${1:?用法: codex.sh <仓库> <任务说明文件> <输出文件>}; brief=${2:?}; out=${3:?}
+repo=${1:?usage: codex.sh <repository> <brief file> <output file>}; brief=${2:?}; out=${3:?}
 mkdir -p "$(dirname "$out")"
-# -s read-only: Codex 不能改仓库。它的答案是意见，不是指令。
+# -s read-only: Codex cannot change the repository. Its answer is an opinion, not an instruction.
 codex exec -s read-only --skip-git-repo-check -C "$repo" -o "$out" - < "$brief" > "${out%.*}.log" 2>&1

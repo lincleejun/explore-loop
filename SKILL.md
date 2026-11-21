@@ -1,129 +1,129 @@
 ---
 name: explore-loop
-description: Run a measured improvement loop on any project (speed, accuracy, memory, size). Each round profiles the accepted baseline, sends several read-only investigator agents in parallel, has a different agent review each proposal, then implements in isolated worktrees; the tool measures candidate against baseline in pairs, decides better / regression / not enough evidence, lands only what passes, and logs every attempt. Use when asked to optimize or tune something measurable, to "explore", "跑探索循环", "展开优化", "多轮实验", or to resume / audit such work.
+description: Run a measured improvement loop on any project (speed, accuracy, memory, size). Each round profiles the accepted baseline, sends several read-only investigator agents in parallel, has a different agent review each proposal, then implements in isolated worktrees; the tool measures candidate against baseline in pairs, decides better / regression / inconclusive, lands only what passes, and logs every attempt. Use when asked to optimize or tune something measurable, to "explore", to run an exploration loop or multi-round experiments, or to resume / audit such work.
 ---
 
 # explore-loop
 
-**每一轮：剖析基线 → 多个调查员并行提案 → 另一个代理审提案 → 隔离通道里实现 → 工具验证。**
-提什么方案、记录写多长由你定。剖析、调查、提案评审这三步必须做过，工具不见到记录就不让开实验、不让落地；一个改动说自己有用，得量出来才算数。
+**Each round: profile the baseline → several investigators propose in parallel → a different agent reviews each proposal → implement in isolated lanes → the tool verifies.**
+What to propose and how long the records are is up to you. Profiling, investigation and proposal review must have happened: the tool opens no experiment and lands nothing until it sees the records. A change that claims to help has to be measured before it counts.
 
-工具是本目录的 `./explore`（Python 3.11+，只用标准库）。
+The tool is `./explore` in this directory (Python 3.11+, standard library only).
 
 ```sh
-explore init ~/wt/<名称> --repo <仓库> --measure '<打印指标行的命令>' --test '<测试命令>' [--build '<构建命令>'] [--rounds 10] [--width 3]
-cd ~/wt/<名称>
-explore aa                                  # 校准一次：每个指标的噪声有多大
-explore next                                # 这一轮还缺什么：剖析、哪个调查员没交、哪个合同没审
-explore new "<想法>" --target "<指标>" --by <调查员>   # 给你一个编号、一页记录、一个 worktree
-explore land E001                           # 验证；过了就合进基线，没过告诉你拦在哪
+explore init ~/wt/<name> --repo <repo> --measure '<command that prints metric lines>' --test '<test command>' [--build '<build command>'] [--rounds 10] [--width 3]
+cd ~/wt/<name>
+explore aa                                  # calibrate once: how noisy each metric is
+explore next                                # what this round still lacks: the profile, which investigator has not reported, which contract is not reviewed
+explore new "<idea>" --target "<metric>" --by <proposal>   # gives you an id, a one-page record, a worktree
+explore land E001                           # verify; merged into the baseline if it passes, otherwise it says where it was blocked
 ```
 
-## 一轮
+## A round
 
 ```
-已接受的基线 ──剖析──▶ 调查员（只读，并行）──提案──▶ 负责人：挑提案，写合同
-     ──▶ 提案评审（另一个代理）──▶ 验证员（各占一个 worktree，并行）：实现、自查、提交
-     ──▶ explore land ──▶ 落地的补丁推进基线，重新剖析；所有结果（含失败）进账本，供下一轮提案
+accepted baseline ──profile──▶ investigators (read-only, in parallel) ──proposals──▶ lead: picks proposals, writes contracts
+     ──▶ proposal review (a different agent) ──▶ verifiers (one worktree each, in parallel): implement, self-check, commit
+     ──▶ explore land ──▶ landed patches advance the baseline, which is profiled again; every result (failures too) goes on the ledger for the next proposals
 ```
 
-**深度和宽度由所有者定，开工前问一句**（没说就用默认），写在 `explore.toml` 的 `[loop]`：
+**The owner decides depth and width; ask before starting** (use the defaults if they do not say). They live in `[loop]` in `explore.toml`:
 
-- `rounds`，深度：做几轮。默认 10。做满了工具不再让开实验，收尾写报告。
-- `width`，宽度：每轮派几个调查员，各查一个不同的主题。默认 3，一般 3–5；代码库大、剖析里热点分散就再多。
+- `rounds`, the depth: how many rounds to run. Default 10. When they are done the tool opens no more experiments; close out and write the report.
+- `width`, the width: how many investigators go out per round, each on a different topic. Default 3, usually 3–5; more when the codebase is big or the profile shows scattered hot spots.
 
-谁调查、谁审提案在 `[agents]` 里配，名字是你派得出去的代理：子代理类型、不同的模型、外部工具（`codex` 走本目录的 `codex.sh`）。
-主题每轮从剖析里来（例：解析、IO、内存分配、并发、算法本身），一个调查员一个，不重叠；同一种代理可以查好几个主题。
+Who investigates and who reviews proposals is configured in `[agents]`. A name is an agent you can dispatch: a subagent type, a different model, an external tool (`codex` goes through `codex.sh` in this directory).
+Topics come from the profile each round (for example: parsing, IO, memory allocation, concurrency, the algorithm itself), one per investigator, not overlapping; one kind of agent may take several topics.
 
-| 步骤 | 谁 | 交什么 | 工具怎么拦 |
+| Step | Who | Hands in | How the tool blocks |
 |---|---|---|---|
-| 剖析 | 负责人（主会话） | `rounds/<基线>/profiling.md`：基线的时间或错误分布在哪，带得出数字的命令；结尾列出这一轮的 `width` 个调查主题 | 没有就不让 `new` |
-| 调查 | `width` 个调查员，一条消息里并行派出，只读；`agents.investigate` 里每种代理至少一个 | `rounds/<基线>/<代理>-<主题>.md`：机制（文件:行）、证据、预测哪个指标从多少到多少；没有值得做的就写没有并给证据 | 不够 `width` 份、或哪种代理没出现，就不让 `new`；`--by` 填提案的文件名 |
-| 提案评审 | `agents.review` 里的一个，不能是提案人 | `experiments/E###.proposal.review.md`，结尾一个块（见下） | 没有、审的不是这版合同、提案人自审、有 blocking 的发现，都不让 `land` |
-| 实现 | 验证员，每个实验一个 worktree；实现可以并行，测量由工具排队 | 提交 | `land` |
-| 裁决 | `explore land` | 账本里的一行 | |
+| Profile | The lead (the main session) | `rounds/<base>/profiling.md`: where the baseline's time or errors go, with the commands that produce the numbers; it ends with this round's `width` investigation topics | Without it, no `new` |
+| Investigate | `width` investigators, sent in parallel in one message, read-only; at least one of every kind in `agents.investigate` | `rounds/<base>/<agent>-<topic>.md`: the mechanism (file:line), the evidence, the prediction of which metric goes from what to what; if nothing is worth doing, say so with evidence | Fewer than `width` files, or a kind of agent that is absent, means no `new`; `--by` takes the proposal's file name |
+| Proposal review | One of `agents.review`, not the proposer | `experiments/E###.proposal.review.md`, ending in a block (see below) | No `land` if it is missing, is of another version of the contract, was written by the proposer, or has a blocking finding |
+| Implement | Verifiers, one worktree per experiment; implementation may run in parallel, the tool queues measurements | A commit | `land` |
+| Decide | `explore land` | A row on the ledger | |
 
-一轮的实验在第一个落地之前都开出来（`explore new`）。基线一动，工具就不再让开新实验：在途的收完（落地的合入新基线后重量，没成的 `close`），再对新基线剖析、调查一次，`rounds/` 下是一个新目录。
+Open all of a round's experiments (`explore new`) before the first one lands. Once the baseline moves, the tool opens no new experiment: finish the open ones (those that land merge the new baseline and are measured again; close the rest), then profile and investigate the new baseline once, in a new directory under `rounds/`.
 
-- **给调查员的说明**里带上：战役目录（`profile.md`、`ledger.md`）、`explore status` 的输出、本轮的 `profiling.md`、它负责的那一个主题。主题不同，才不会交回同一份东西。
-- **提案评审问的**：改的是通用机制，还是只对基准的夹具和数据有效；账本里同一机制试过吗、旧的失败原因还成立吗；合同引用的代码和数字自己查一遍对不对；预测大于 `explore power` 看得出的幅度吗；漏了哪条不能变的行为。
-  块的格式：`{"kind":"proposal-review","target":"E001","by":"<评审人>","contract":"<explore next 给的指纹>","findings":[{"where":"…","blocking":true}]}`。合同改了要重审。
-- **负责人不写产品代码**，不绕过 `land` 合并。自己提的方案自己验收，验收就不诚实了。
+- **The brief for an investigator** includes: the campaign directory (`profile.md`, `ledger.md`), the output of `explore status`, this round's `profiling.md`, and the one topic it owns. Different topics are what keep them from handing in the same thing.
+- **What the proposal review asks**: is this a general mechanism, or does it work only on the benchmark's fixtures and data; has the same mechanism been tried according to the ledger, and does the old reason for failure still hold; are the code and the numbers the contract cites right when you check them yourself; is the prediction larger than what `explore power` says can be seen; which behavior that must not change is missing.
+  The block: `{"kind":"proposal-review","target":"E001","by":"<reviewer>","contract":"<the fingerprint explore next gives>","findings":[{"where":"…","blocking":true}]}`. A changed contract needs a new review.
+- **The lead writes no product code** and does not merge around `land`. A proposer who accepts its own proposal is not an honest acceptance.
 
-`explore next` 说现在卡在哪；`explore status` 是账本；`explore close E001 --as 放弃|拒绝|改向 --why …` 收掉没成的；
-`explore power` 说在你的噪声下多大的变化才看得出来。
+`explore next` says where things are stuck; `explore status` is the ledger; `explore close E001 --as abandoned|rejected|redirected --why …` closes what did not work;
+`explore power` says how big a change can be seen at your noise.
 
-## 工具需要你给的
+## What the tool needs from you
 
-- **指标行**。测量命令打印 `PERF <名称> <数字> <s|ms>`，或 `METRIC <lower|higher|exact> <名称> <值> <单位>`（准确率用 higher，校验值用 exact）。
-- **目标**。`new` 的 `--target`：这个想法要改善哪个指标。其余指标自动成为护栏。
-- **干净的提交**。候选要提交了才量；构建和测试留下的文件要在 `.gitignore` 里。
-- 其余都可选：`--allow` 限定可改的文件，`--predict` 记下预测好事后对账，`explore.toml` 里的不变量命令、锁定路径、留出集。
+- **Metric lines**. The measure command prints `PERF <name> <number> <s|ms>`, or `METRIC <lower|higher|exact> <name> <value> <unit>` (use higher for accuracy, exact for checksums).
+- **A target**. `--target` of `new`: which metric this idea should improve. Every other metric becomes a guard.
+- **A clean commit**. A candidate is measured only once it is committed; files left by the build and the tests must be in `.gitignore`.
+- Everything else is optional: `--allow` limits the files that may change, `--predict` records a prediction to score afterwards, and `explore.toml` takes invariant commands, locked paths and holdout sets.
 
-`init` 不碰主检出：它建两条分支和两个 worktree，`~/wt/<名称>/` 放记录（随时提交），`~/wt/<名称>-base/` 是基线，候选在 `~/wt/<名称>-E001/`。
+`init` does not touch the main checkout: it creates two branches and two worktrees. `~/wt/<name>/` holds the records (commit it whenever), `~/wt/<name>-base/` is the baseline, and candidates are in `~/wt/<name>-E001/`.
 
-## 工具怎么验证
+## How the tool verifies
 
-1. 候选是包含当前基线的干净提交，只改了它声明要改的文件，测试和不变量通过。
-2. 基线和候选成对测量（默认 10 对，先后顺序两对一平衡，全机一把锁，机器忙就作废）。
-3. 一个指标要同时满足两条才算变了：方向显著（精确符号检验，按指标数校正），而且成对差的中位数超过门槛。
-   目标的门槛是 `min_gain`；护栏的门槛是 `guard`%、`floor`、校准噪声三者取大。
-   统计上保证的只有一条：什么都没变时，一次落地被噪声误判的概率不超过 `alpha`。中位数门槛是工程上的幅度筛选，
-   真实变化贴着门槛时（慢 4.9%、容忍 5%）它会两边摆。
-4. 目标变好、护栏没有回归 → 快进合并，记账。否则记一条"拦下"。量完再核一次两边还是原来的提交。
+1. The candidate is a clean commit that contains the current baseline and changes only the files it declared; the tests and the invariants pass.
+2. Baseline and candidate are measured in pairs (10 by default, the order balanced every two pairs, one lock for the whole machine, void if the machine is busy).
+3. A metric counts as changed only if both hold: the direction is significant (exact sign test, corrected for the number of metrics), and the median of the paired differences is beyond a threshold.
+   For a target the threshold is `min_gain`; for a guard it is the largest of `guard`%, `floor` and the calibrated noise.
+   Only one thing is guaranteed statistically: when nothing changed, the probability that noise misjudges a landing is at most `alpha`. The median threshold is an engineering filter on size;
+   when the real change sits right at the threshold (4.9% slower with a 5% tolerance) it can go either way.
+4. Targets better and no guard regressed → fast-forward merge, logged. Otherwise a "blocked" row is logged. After measuring, both sides are checked again to be the same commits.
 
-同样的提交不会重量（要重量得写理由），记录里的目标过了闸门就不能悄悄改，被拦下的每一次都留在账本里。
-所有者可以破例：`--owner-ok "<原话>"`，账本里标出来。
+The same commits are not measured twice (measuring again needs a written reason), the target in a record cannot be changed quietly once it has passed the gate, and every blocked attempt stays on the ledger.
+The owner can make an exception: `--owner-ok "<their words>"`, marked on the ledger.
 
-这条规则的数据（15 个指标，`explore power` 可复现）：
+The data behind this rule (15 metrics, reproducible with `explore power`):
 
-| 单次测量的离散 | 对数 | 什么都没变时被误拦 | 目标快 5% 被看出 | 快 10% 被看出 | 护栏慢 10% 被拦住 |
+| Spread of a single measurement | Pairs | Blocked when nothing changed | Target 5% faster is seen | 10% faster is seen | Guard 10% slower is blocked |
 |---|---|---|---|---|---|
 | 3% | 10 | 0.0% | 29% | 91% | 89% |
 | 3% | 20 | 0.0% | 80% | 100% | 99% |
-| 8% | 20 | 0.0% | 7% | 47% | 0%（容忍度被噪声抬到约 19%） |
+| 8% | 20 | 0.0% | 7% | 47% | 0% (the noise raises the tolerance to about 19%) |
 
-表里是独立正态噪声的模拟，实际的漂移和缓存状态只会更差。15 个指标、10 对时要 10 对全同向才显著；20 对容得下 3 对相反。
-第一个实验连校准共 40 次单边测量，之后每个 20 次。对数在看结果之前定，不要量到显著为止。
-"证据不足"不等于"没有回归"。噪声大的指标当不了护栏，`explore aa` 会点名；想看出小变化就加 `pairs` 或先把测量做稳。
-"显著性加最小幅度"的思路来自 criterion.rs 和 asv（它们用的检验不同）；至少 10 次、交替测量来自 benchstat。
-换掉的第一版规则（每边 4 个样本、85% 胜率线）在同样条件下约 16% 的落地被纯噪声误拦。
+The table simulates independent normal noise; real drift and cache state only make it worse. With 15 metrics and 10 pairs, all 10 pairs must agree to be significant; 20 pairs leave room for 3 that disagree.
+The first experiment costs 40 single-side measurements including calibration, each later one 20. Fix the number of pairs before looking at results; do not measure until it is significant.
+"Inconclusive" is not "no regression". A noisy metric cannot serve as a guard, and `explore aa` names those; to see small changes, raise `pairs` or make the measurement steadier first.
+"Significance plus a minimum size" comes from criterion.rs and asv (they use other tests); at least 10 runs and alternating measurements come from benchstat.
+The first version of the rule, now replaced (4 samples a side, an 85% win line), blocked about 16% of landings on pure noise under the same conditions.
 
-## 要更严的时候
+## When you want it stricter
 
-- `explore.toml` 里 `strict = true`：除了提案评审，落地还要一份针对这份代码的评审，写在 `experiments/E###.review.md`，结尾一个块：
-  `{"kind":"review","target":"E001","sha":"<评审的提交>","findings":[{"where":"…","blocking":true}]}`。有 blocking 的发现就不落地；代码改了要重审。
-  让谁评审由你定；另一个模型、不带实现时的上下文，最容易看出测试没覆盖的行为变化。
-- 调参和准确率类的工作：在 `explore.toml` 登记数据集的用途，留出集放在仓库外，只经 `explore holdout` 用并记账。
+- `strict = true` in `explore.toml`: besides the proposal review, landing also needs a review of this very code, written to `experiments/E###.review.md` and ending in a block:
+  `{"kind":"review","target":"E001","sha":"<the reviewed commit>","findings":[{"where":"…","blocking":true}]}`. A blocking finding means no landing; changed code needs a new review.
+  Who reviews is up to you; a different model, without the context of the implementation, most easily sees a behavior change the tests do not cover.
+- Tuning and accuracy work: register what each dataset is for in `explore.toml`, keep the holdout set outside the repository, and use it only through `explore holdout`, which logs every use.
 
-## 工具管不了的
+## What the tool cannot do
 
-- 它防疏忽，不防作弊：剖析和提案是不是真的由那个代理做的、评审是谁写的、破例的话是谁说的，它不知道，只留痕。
-- 提案评审在 `land` 时才核对：先审后实现靠 `explore next` 的顺序提醒，不是强制。指纹只盖合同的 json 块，正文里的机制和证据改了不会要求重审。
-- 留出集挡不住读取；`locked` 只在落地时核对文件大小和修改时间。
-- 只支持"一个仓库、候选是它的 worktree"。测量命令在各自的 worktree 里执行：把测量工具的文件写进 `explore.toml` 的 `harness`，
-  候选就不许改它们；要改就直接提交到战役分支再重新校准。
-- 量的环境不是产品（模拟器、小输入、开发机）时，结论要在报告里打折说。
+- It guards against carelessness, not against cheating: whether the profile and the proposals were really made by that agent, who wrote a review, who spoke the words of an exception, it does not know. It only leaves a trace.
+- The proposal review is checked only at `land`: review before implementation is the order `explore next` reminds you of, not something it enforces. The fingerprint covers only the contract's json block, so a change to the mechanism or the evidence in the body does not ask for a new review.
+- A holdout set cannot be protected from being read; `locked` only compares file sizes and modification times at landing.
+- Only "one repository, candidates are its worktrees" is supported. The measure command runs in each worktree: list the harness's files under `harness` in `explore.toml`
+  and candidates may not change them; to change them, commit to the campaign branch directly and calibrate again.
+- When the measured environment is not the product (a simulator, small inputs, a dev machine), discount the conclusions in the report.
 
-## 前几次用下来值得知道的
+## Worth knowing from the first campaigns
 
-不是规定，是别人已经付过学费的地方。
+Not rules. These are places where someone has already paid for the lesson.
 
-- 最大的收益常来自动手前读代码时发现"前提是错的"；剖析里某一帧消失不等于变快，只认端到端的数字。
-- 基准全绿只说明基准覆盖到的地方没变。快路径最容易丢的是旧代码隐含的失败行为。
-- 针对基准里的名字、夹具、已知答案做特殊处理，循环迟早会学会；所以要问一句"换一份数据还成立吗"。
-- 先验一下裁判：拿一个已知更差的提交 `explore ab` 一次。判不出回归，这套测量就当不了这个方向的裁判，先修它。
-- "证据不足"只对量过的那份数据成立。只覆盖一个地区、一种尺寸的评测集上不显著的想法，换一份分布可能是最大的收益；
-  用 `--as 放弃` 关掉它时把"在什么数据上"写进 `--why`。
-- 默认关的开关也能走闸门：测量命令里打开它（基线不认识这个变量），再加一条"不设时输出逐位相同"的不变量。
-  落地后在 `ledger.md` 记一句"默认开等所有者决定"，否则账本里它和输出等价的改动分不出来。
-- 没成的实验和成的一样有用：下次提想法前先看 `explore status`。
-- 测试通过要看跳过数；缓存的键里要有上游代码的指纹；load average 看不出 GPU 被占。
-- 不要用管道接测量和测试命令，管道会吞掉退出码。
+- The biggest gain often comes from reading the code before starting and finding that the premise is wrong; a frame that vanishes from the profile does not mean faster, so trust only end-to-end numbers.
+- An all-green benchmark only says that what the benchmark covers did not change. What a fast path loses most easily is failure behavior the old code had implicitly.
+- Special-casing the benchmark's names, fixtures or known answers is something a loop learns sooner or later; so ask "does this still hold on other data".
+- Test the judge first: run `explore ab` once on a commit that is known to be worse. If it cannot call the regression, this measurement cannot judge that direction; fix it first.
+- "Inconclusive" holds only for the data that was measured. An idea that is not significant on an eval set covering one region or one size may be the biggest gain on another distribution;
+  when you close it with `--as abandoned`, write "on which data" into `--why`.
+- A switch that is off by default can go through the gate too: turn it on in the measure command (the baseline does not know the variable), and add an invariant "output is bit-identical when it is unset".
+  After it lands, note in `ledger.md` that "on by default waits for the owner's decision", or the ledger cannot tell it from an output-equivalent change.
+- Experiments that failed are as useful as those that worked: read `explore status` before proposing the next idea.
+- When tests pass, look at the number skipped; a cache key needs a fingerprint of the upstream code; load average does not show a busy GPU.
+- Do not pipe the measure and test commands into anything: a pipe swallows the exit code.
 
-## 收尾
+## Closing out
 
-停下来（做满 `rounds` 轮、所有者叫停、一轮下来没有落地）之前：`explore status` 看一眼从没当过目标的指标，报告里说明为什么没查；
-留出集只在这时用一次，结果和已关掉的实验相反就回写；量的环境和产品的差别、没实测只审过代码的路径，在报告里各写一句。
+Before stopping (all `rounds` done, the owner calls a halt, a round with no landing): look in `explore status` at the metrics that were never a target and say in the report why they were not examined;
+use the holdout set once, only now, and write the result back if it contradicts an experiment that was closed; give one sentence each to how the measured environment differs from the product and to the paths that were reviewed as code but never measured.
 
-改这个 skill：`./explore selftest` 和 `./test.sh` 都要过。
+To change this skill: `./explore selftest` and `./test.sh` must both pass.
